@@ -1,0 +1,30 @@
+  first steps
+    v textured cube
+    v fix camera
+    v fps flying movement
+      multiple cubes and moving light
+      restructure code
+  loading objects and textures from files
+  loading sponza
+  asset manager
+  normal mapping
+  antialiasing and filtering
+  pbr shader
+  generalized materials
+  basic shadows
+  dynamic light
+  basic collision and physics
+  scene manager
+  ecs module
+  tetris demo
+  animation
+  debug gui
+  in-game gui
+  scene editor
+  audio engine
+  particle system
+  reflections
+  ssao
+  game engine architecture
+  threading
+  level streaming
