@@ -21,13 +21,13 @@ impl Texture {
         v_mode: wgpu::AddressMode,
     ) -> Result<Self> {
         let path = img_file.as_ref();
-        let img = ImageReader::open(path)?.decode()?;
-        let rgba = img.as_rgba8().ok_or_else(|| {
-            EngineError::asset(
-                path.as_os_str().to_str().unwrap_or("unknown"),
-                "only rgba8 textures are supported",
-            )
-        })?;
+        let img = ImageReader::open(path)?.decode()?.flipv();
+        let rgba = img.to_rgba8(); //.as_rgba8().ok_or_else(|| {
+                                   //     EngineError::asset(
+                                   //         path.as_os_str().to_str().unwrap_or("unknown"),
+                                   //         "only rgba8 textures are supported",
+                                   //     )
+                                   // })?;
         let dimensions = img.dimensions();
 
         let size = wgpu::Extent3d {
@@ -53,7 +53,7 @@ impl Texture {
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
             },
-            rgba,
+            &rgba,
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * dimensions.0),

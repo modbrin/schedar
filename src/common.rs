@@ -1,12 +1,12 @@
 use crate::{
     camera,
-    geometry::{StaticMesh, Vertex},
+    geometry::{self, CompositeMesh, StaticMesh, Vertex},
     texture, transforms,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
 use cgmath::{num_traits::clamp, *};
-use std::iter;
+use std::{iter, path::PathBuf};
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -121,71 +121,152 @@ impl CameraUniform {
     }
 }
 
-struct State {
-    pub init: InitWgpu,
-    pipeline: wgpu::RenderPipeline,
+pub struct DrawableMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     indices_num: u32,
-
-    camera: camera::Camera,
-    projection: Matrix4<f32>,
-    camera_controller: camera::CameraController,
-    camera_uniform: CameraUniform,
-    camera_bind_group: wgpu::BindGroup,
-    vs_uniform_buffer: wgpu::Buffer,
-    fs_uniform_buffer: wgpu::Buffer,
-    _light_uniform_buffer: wgpu::Buffer,
-    mouse_pressed: bool,
-
-    _image_texture: texture::Texture,
-    texture_bind_group: wgpu::BindGroup,
-    light_position: Point3<f32>,
+    material_id: usize,
+    pipeline_layout: wgpu::PipelineLayout,
+    pipeline: wgpu::RenderPipeline,
 }
 
-impl State {
-    async fn new(
-        window: &Window,
+impl DrawableMesh {
+    pub fn new(
+        device: &wgpu::Device,
         static_mesh: &StaticMesh,
-        light_data: Light,
-        img_file: &str,
-        u_mode: wgpu::AddressMode,
-        v_mode: wgpu::AddressMode,
-    ) -> Result<Self> {
-        let init = InitWgpu::init_wgpu(window).await?;
+        material_id: usize,
+        shader: &wgpu::ShaderModule,
+        config: &wgpu::SurfaceConfiguration,
+        camera_bind_group_layout: &wgpu::BindGroupLayout,
+        texture_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> DrawableMesh {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: cast_slice(&static_mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: cast_slice(&static_mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        DrawableMesh {
+            vertex_buffer,
+            index_buffer,
+            material_id,
+            indices_num: static_mesh.indices.len() as u32,
+            pipeline_layout,
+            pipeline,
+        }
+    }
 
+    // TODO: how to fix?
+    pub fn render<'a, 'b: 'a>(
+        &'b self,
+        render_pass: &'a mut wgpu::RenderPass<'a>,
+        camera_bind_group: &'a wgpu::BindGroup,
+        texture_bind_group: &'a wgpu::BindGroup,
+    ) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.set_bind_group(0, camera_bind_group, &[]);
+        render_pass.set_bind_group(1, texture_bind_group, &[]);
+        render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
+    }
+}
+
+struct DrawableTexture {
+    _image_texture: texture::Texture,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    texture_bind_group: wgpu::BindGroup,
+}
+
+impl DrawableTexture {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        material: &geometry::Material,
+    ) -> Result<DrawableTexture> {
+        let fallback = PathBuf::from("assets/brick.png");
+        let path = if let Some(geometry::MaterialParam::Texture(path)) = &material.albedo {
+            path
+        } else {
+            // return Err(anyhow!("non texture encoutered for albedo"));
+            &fallback
+        };
         let image_texture = texture::Texture::create_texture_data(
-            &init.device,
-            &init.queue,
-            img_file,
-            u_mode,
-            v_mode,
+            device,
+            queue,
+            path.as_path(),
+            wgpu::AddressMode::Repeat,
+            wgpu::AddressMode::Repeat,
         )?;
         let texture_bind_group_layout =
-            init.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                multisampled: false,
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            },
-                            count: None,
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                    label: Some("Texture Bind Group Layout"),
-                });
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Texture Bind Group Layout"),
+            });
 
-        let texture_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -199,6 +280,43 @@ impl State {
             ],
             label: Some("Texture Bind Group"),
         });
+        let result = DrawableTexture {
+            _image_texture: image_texture,
+            texture_bind_group_layout,
+            texture_bind_group,
+        };
+        Ok(result)
+    }
+}
+
+struct State {
+    pub init: InitWgpu,
+
+    models: Vec<DrawableMesh>,
+    textures: Vec<DrawableTexture>,
+
+    // camera
+    camera: camera::Camera,
+    projection: Matrix4<f32>,
+    camera_controller: camera::CameraController,
+    camera_uniform: CameraUniform,
+    camera_bind_group: wgpu::BindGroup,
+    mouse_pressed: bool,
+
+    // light
+    vs_uniform_buffer: wgpu::Buffer,
+    fs_uniform_buffer: wgpu::Buffer,
+    _light_uniform_buffer: wgpu::Buffer,
+    light_position: Point3<f32>,
+    going_backwards: bool,
+}
+
+impl State {
+    async fn new(window: &Window, mesh: &CompositeMesh, light_data: Light) -> Result<Self> {
+        let init = InitWgpu::init_wgpu(window).await?;
+
+        let mut drawable_meshes = Vec::new();
+        let mut drawable_textures = Vec::new();
 
         let shader = init
             .device
@@ -207,8 +325,8 @@ impl State {
                 source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
             });
 
-        let camera = camera::Camera::new((3.0, 1.5, 3.0), cgmath::Deg(-80.0), cgmath::Deg(-30.0));
-        let camera_controller = camera::CameraController::new(0.3, 5.0);
+        let camera = camera::Camera::new((0.0, 10.0, 0.0), cgmath::Deg(-20.0), cgmath::Deg(0.0));
+        let camera_controller = camera::CameraController::new(0.3, 30.0);
         let aspect = init.config.width as f32 / init.config.height as f32;
         let projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
 
@@ -301,74 +419,34 @@ impl State {
             label: Some("Camera Bind Group"),
         });
 
-        let pipeline_layout = init
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        for material in mesh.materials.iter() {
+            let t = DrawableTexture::new(&init.device, &init.queue, material)?;
+            drawable_textures.push(t);
+        }
 
-        let pipeline = init
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Render Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[Vertex::desc()],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: init.config.format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent::REPLACE,
-                            alpha: wgpu::BlendComponent::REPLACE,
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth24Plus,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            });
-
-        let vertex_buffer = init
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: cast_slice(&static_mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let index_buffer = init
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Index Buffer"),
-                contents: cast_slice(&static_mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        for (static_mesh, mat_id) in mesh.components.iter() {
+            if let Some(mat_id) = *mat_id {
+                let texture_bind_group_layout =
+                    &drawable_textures[mat_id].texture_bind_group_layout;
+                let m = DrawableMesh::new(
+                    &init.device,
+                    static_mesh,
+                    mat_id,
+                    &shader,
+                    &init.config,
+                    &camera_bind_group_layout,
+                    texture_bind_group_layout,
+                );
+                drawable_meshes.push(m);
+            } else {
+                println!("encountered mesh without referenced texture");
+            }
+        }
 
         let result = Self {
             init,
-            pipeline,
-            vertex_buffer,
-            index_buffer,
-            indices_num: static_mesh.indices.len() as u32,
+            models: drawable_meshes,
+            textures: drawable_textures,
             camera,
             projection,
             camera_controller,
@@ -378,9 +456,8 @@ impl State {
             fs_uniform_buffer,
             _light_uniform_buffer: light_uniform_buffer,
             mouse_pressed: false,
-            _image_texture: image_texture,
-            texture_bind_group,
-            light_position: Point3::new(0.0, 0.0, 2.0),
+            light_position: Point3::new(0.0, 10.0, 0.0),
+            going_backwards: false,
         };
         Ok(result)
     }
@@ -421,10 +498,19 @@ impl State {
 
     fn update(&mut self, dt: f32) {
         // update light
-        if self.light_position.x > 3.0 {
-            self.light_position.x = -3.0;
+        if self.light_position.x > 120.0 {
+            // self.light_position.x = -150.0;
+            self.going_backwards = true;
         }
-        self.light_position.x += dt;
+        if self.light_position.x < -120.0 {
+            // self.light_position.x = -150.0;
+            self.going_backwards = false;
+        }
+        if self.going_backwards {
+            self.light_position.x -= dt * 50.0;
+        } else {
+            self.light_position.x += dt * 50.0;
+        }
 
         // camera update
         self.camera_controller.update_camera(&mut self.camera, dt);
@@ -433,7 +519,7 @@ impl State {
 
         // model + normal
         let model_mat =
-            transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+            transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.1, 0.1, 0.1]);
         let normal_mat = model_mat
             .invert()
             .ok_or_else(|| anyhow!("matrix is not invertible"))
@@ -527,12 +613,24 @@ impl State {
                 }),
             });
 
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-            render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
+            for model in self.models.iter() {
+                // model.render(
+                //     &mut render_pass,
+                //     &self.camera_bind_group,
+                //     &self.textures[model.material_id].texture_bind_group,
+                // )
+                render_pass.set_pipeline(&model.pipeline);
+                render_pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(
+                    1,
+                    &self.textures[model.material_id].texture_bind_group,
+                    &[],
+                );
+                render_pass.draw_indexed(0..model.indices_num, 0, 0..1);
+            }
         }
 
         self.init.queue.submit(iter::once(encoder.finish()));
@@ -542,25 +640,12 @@ impl State {
     }
 }
 
-pub fn run(
-    vertex_data: &StaticMesh,
-    light_data: Light,
-    file_name: &str,
-    u_mode: wgpu::AddressMode,
-    v_mode: wgpu::AddressMode,
-) -> Result<()> {
+pub fn run(mesh: &CompositeMesh, light_data: Light) -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop)?;
     window.set_title(WINDOW_TITLE);
-    let mut state = pollster::block_on(State::new(
-        &window,
-        &vertex_data,
-        light_data,
-        &file_name,
-        u_mode,
-        v_mode,
-    ))?;
+    let mut state = pollster::block_on(State::new(&window, mesh, light_data))?;
 
     let mut render_start_time = std::time::Instant::now();
 

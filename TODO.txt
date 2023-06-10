@@ -5,14 +5,14 @@
     v multiple cubes and moving light
     v restructure code
   loading objects and textures from files
-      asset struct
-      use obj crate
-      use ddx or similar format for textures
+    v asset struct
+    v use obj crate
+    v loading textures
+    v multiple objects
+    v loading full sponza
       proper asset encapsulation in pipeline
-      loading textures
-      multiple objects
-      loading full sponza
       asset manager
+      use ddx or similar format for textures
   normal mapping
   antialiasing and filtering
   aabb?
@@ -24,6 +24,7 @@
   basic collision and physics
   scene manager
   actors, components and ecs module
+  async asset loading
   tetris demo
   debug gui
   animation
