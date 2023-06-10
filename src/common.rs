@@ -1,13 +1,20 @@
-use crate::{camera, texture, transforms};
+use crate::{
+    camera,
+    geometry::{StaticMesh, Vertex},
+    texture, transforms,
+};
+use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
 use cgmath::{num_traits::clamp, *};
-use std::{iter, mem};
+use std::iter;
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+static WINDOW_TITLE: &str = "Schedar Demo";
 
 pub struct InitWgpu {
     pub surface: wgpu::Surface,
@@ -18,13 +25,13 @@ pub struct InitWgpu {
 }
 
 impl InitWgpu {
-    pub async fn init_wgpu(window: &Window) -> Self {
+    pub async fn init_wgpu(window: &Window) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             dx12_shader_compiler: wgpu::Dx12Compiler::default(),
         });
-        let surface = unsafe { instance.create_surface(window).unwrap() };
+        let surface = unsafe { instance.create_surface(window)? };
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -32,7 +39,7 @@ impl InitWgpu {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("Failed to find an appropriate adapter");
+            .ok_or_else(|| anyhow!("failed to select appropriate adapter"))?;
 
         let (device, queue) = adapter
             .request_device(
@@ -41,23 +48,21 @@ impl InitWgpu {
                     features: wgpu::Features::empty(),
                     limits: wgpu::Limits::default(),
                 },
-                None, // Trace path
+                None, // api call tracing
             )
-            .await
-            .unwrap();
+            .await?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
             .iter()
-            .copied()
             .filter(|f| f.is_srgb())
             .next()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or(&surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
+            format: *surface_format,
             width: size.width,
             height: size.height,
             present_mode: surface_caps.present_modes[0],
@@ -66,40 +71,38 @@ impl InitWgpu {
         };
         surface.configure(&device, &config);
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
             config,
             size,
-        }
+        })
     }
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Light {
     specular_color: [f32; 4],
     ambient_intensity: f32,
     diffuse_intensity: f32,
     specular_intensity: f32,
     specular_shininess: f32,
-    is_two_side: i32,
 }
 
-pub fn light(sc: [f32; 3], ai: f32, di: f32, si: f32, ss: f32, its: i32) -> Light {
+pub fn light(sc: [f32; 3], ai: f32, di: f32, si: f32, ss: f32) -> Light {
     Light {
         specular_color: [sc[0], sc[1], sc[2], 1.0],
         ambient_intensity: ai,
         diffuse_intensity: di,
         specular_intensity: si,
         specular_shininess: ss,
-        is_two_side: its,
     }
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_project_mat: [[f32; 4]; 4],
 }
@@ -118,31 +121,12 @@ impl CameraUniform {
     }
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct Vertex {
-    pub position: [f32; 4],
-    pub normal: [f32; 4],
-    pub uv: [f32; 2],
-}
-
-impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0=>Float32x4, 1=>Float32x4, 2=>Float32x2];
-    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBUTES,
-        }
-    }
-}
-
 struct State {
     pub init: InitWgpu,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    n_vertices: u32,
+    index_buffer: wgpu::Buffer,
+    indices_num: u32,
 
     camera: camera::Camera,
     projection: Matrix4<f32>,
@@ -156,18 +140,19 @@ struct State {
 
     _image_texture: texture::Texture,
     texture_bind_group: wgpu::BindGroup,
+    light_position: Point3<f32>,
 }
 
 impl State {
     async fn new(
         window: &Window,
-        vertex_data: &Vec<Vertex>,
+        static_mesh: &StaticMesh,
         light_data: Light,
         img_file: &str,
         u_mode: wgpu::AddressMode,
         v_mode: wgpu::AddressMode,
-    ) -> Self {
-        let init = InitWgpu::init_wgpu(window).await;
+    ) -> Result<Self> {
+        let init = InitWgpu::init_wgpu(window).await?;
 
         let image_texture = texture::Texture::create_texture_data(
             &init.device,
@@ -175,8 +160,7 @@ impl State {
             img_file,
             u_mode,
             v_mode,
-        )
-        .unwrap();
+        )?;
         let texture_bind_group_layout =
             init.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -368,16 +352,23 @@ impl State {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Vertex Buffer"),
-                contents: cast_slice(vertex_data),
+                contents: cast_slice(&static_mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let n_vertices = vertex_data.len() as u32;
+        let index_buffer = init
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Index Buffer"),
+                contents: cast_slice(&static_mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
-        Self {
+        let result = Self {
             init,
             pipeline,
             vertex_buffer,
-            n_vertices,
+            index_buffer,
+            indices_num: static_mesh.indices.len() as u32,
             camera,
             projection,
             camera_controller,
@@ -389,7 +380,9 @@ impl State {
             mouse_pressed: false,
             _image_texture: image_texture,
             texture_bind_group,
-        }
+            light_position: Point3::new(0.0, 0.0, 2.0),
+        };
+        Ok(result)
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -427,6 +420,12 @@ impl State {
     }
 
     fn update(&mut self, dt: f32) {
+        // update light
+        if self.light_position.x > 3.0 {
+            self.light_position.x = -3.0;
+        }
+        self.light_position.x += dt;
+
         // camera update
         self.camera_controller.update_camera(&mut self.camera, dt);
         self.camera_uniform
@@ -435,7 +434,11 @@ impl State {
         // model + normal
         let model_mat =
             transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        let normal_mat = (model_mat.invert().unwrap()).transpose();
+        let normal_mat = model_mat
+            .invert()
+            .ok_or_else(|| anyhow!("matrix is not invertible"))
+            .unwrap()
+            .transpose();
         let model_ref: &[f32; 16] = model_mat.as_ref();
         let normal_ref: &[f32; 16] = normal_mat.as_ref();
 
@@ -455,7 +458,7 @@ impl State {
         );
 
         // write frag shader data
-        let light_position: &[f32; 3] = self.camera.position.as_ref();
+        let light_position: &[f32; 3] = self.light_position.as_ref();
         let eye_position: &[f32; 3] = self.camera.position.as_ref();
         self.init.queue.write_buffer(
             &self.fs_uniform_buffer,
@@ -526,9 +529,10 @@ impl State {
 
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-            render_pass.draw(0..self.n_vertices, 0..1);
+            render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
         }
 
         self.init.queue.submit(iter::once(encoder.finish()));
@@ -539,16 +543,16 @@ impl State {
 }
 
 pub fn run(
-    vertex_data: &Vec<Vertex>,
+    vertex_data: &StaticMesh,
     light_data: Light,
     file_name: &str,
     u_mode: wgpu::AddressMode,
     v_mode: wgpu::AddressMode,
-) {
+) -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
-    window.set_title("Schedar Demo");
+    let window = WindowBuilder::new().build(&event_loop)?;
+    window.set_title(WINDOW_TITLE);
     let mut state = pollster::block_on(State::new(
         &window,
         &vertex_data,
@@ -556,7 +560,7 @@ pub fn run(
         &file_name,
         u_mode,
         v_mode,
-    ));
+    ))?;
 
     let mut render_start_time = std::time::Instant::now();
 

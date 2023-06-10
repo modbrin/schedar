@@ -2,29 +2,39 @@
     v textured cube
     v fix camera
     v fps flying movement
-      multiple cubes and moving light
-      restructure code
+    v multiple cubes and moving light
+    v restructure code
   loading objects and textures from files
-  loading sponza
-  asset manager
+      asset struct
+      use obj crate
+      use ddx or similar format for textures
+      proper asset encapsulation in pipeline
+      loading textures
+      multiple objects
+      loading full sponza
+      asset manager
   normal mapping
   antialiasing and filtering
+  aabb?
   pbr shader
   generalized materials
+  transparency and object order
   basic shadows
-  dynamic light
+  dynamic light and multiple lights
   basic collision and physics
   scene manager
-  ecs module
+  actors, components and ecs module
   tetris demo
-  animation
   debug gui
+  animation
   in-game gui
   scene editor
   audio engine
   particle system
   reflections
+  lod
   ssao
-  game engine architecture
+  engine architecture planning
   threading
   level streaming
+  better lighting

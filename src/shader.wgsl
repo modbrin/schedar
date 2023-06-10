@@ -7,8 +7,8 @@ struct ModelUniforms {
 @group(0) @binding(0) var<uniform> uniforms: ModelUniforms;
 
 struct Input {
-    @location(0) pos: vec4<f32>,
-    @location(1) normal: vec4<f32>,
+    @location(0) pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
 };
 
@@ -22,9 +22,9 @@ struct Output {
 @vertex
 fn vs_main(in: Input) -> Output {
     var output: Output;
-    let m_position: vec4<f32> = uniforms.model_mat * in.pos;
+    let m_position: vec4<f32> = uniforms.model_mat * vec4<f32>(in.pos, 1.0);
     output.v_position = m_position;
-    output.v_normal = uniforms.normal_mat * in.normal;
+    output.v_normal = uniforms.normal_mat * vec4<f32>(in.normal, 1.0);
     output.v_uv = in.uv;
     output.position = uniforms.view_project_mat * m_position;
     return output;
@@ -41,7 +41,6 @@ struct LightParamUniforms {
     diffuse_intensity: f32,
     specular_intensity: f32,
     specular_shininess: f32,
-    is_two_side: i32,
 };
 
 @group(0) @binding(1) var<uniform> frag_uniforms: LightUniforms;
@@ -62,12 +61,6 @@ fn fs_main(in: Output) -> @location(0) vec4<f32> {
     var diffuse: f32 = light_uniforms.diffuse_intensity * max(dot(N, L), 0.0);
     var specular: f32 = light_uniforms.specular_intensity *
         pow(max(dot(N, H), 0.0), light_uniforms.specular_shininess);
-
-    var is_two_side: i32 = light_uniforms.is_two_side;
-    if (is_two_side == 1) {
-        diffuse = diffuse + light_uniforms.diffuse_intensity * max(dot(-N, L), 0.0);
-        specular = specular + light_uniforms.specular_intensity * pow(max(dot(-N, H), 0.0), light_uniforms.specular_shininess);
-    }
 
     let ambient: f32 = light_uniforms.ambient_intensity;
     let final_color: vec3<f32> = texture_color.rgb * (ambient + diffuse) + 
