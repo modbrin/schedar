@@ -303,6 +303,9 @@ struct State {
     camera_bind_group: wgpu::BindGroup,
     mouse_pressed: bool,
 
+    // smaa
+    smaa_target: smaa::SmaaTarget,
+
     // light
     vs_uniform_buffer: wgpu::Buffer,
     fs_uniform_buffer: wgpu::Buffer,
@@ -443,6 +446,15 @@ impl State {
             }
         }
 
+        let mut smaa_target = smaa::SmaaTarget::new(
+            &init.device,
+            &init.queue,
+            window.inner_size().width,
+            window.inner_size().height,
+            init.config.format,
+            smaa::SmaaMode::Smaa1X,
+        );
+
         let result = Self {
             init,
             models: drawable_meshes,
@@ -454,6 +466,7 @@ impl State {
             camera_uniform,
             vs_uniform_buffer,
             fs_uniform_buffer,
+            smaa_target,
             _light_uniform_buffer: light_uniform_buffer,
             mouse_pressed: false,
             light_position: Point3::new(0.0, 10.0, 0.0),
@@ -473,6 +486,8 @@ impl State {
             self.init
                 .surface
                 .configure(&self.init.device, &self.init.config);
+            self.smaa_target
+                .resize(&self.init.device, new_size.width, new_size.height);
         }
     }
 
@@ -564,6 +579,10 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let smaa_frame = self
+            .smaa_target
+            .start_frame(&self.init.device, &self.init.queue, &view);
+
         let depth_texture = self.init.device.create_texture(&wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
                 width: self.init.config.width,
@@ -591,7 +610,7 @@ impl State {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &(*smaa_frame),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -634,6 +653,8 @@ impl State {
         }
 
         self.init.queue.submit(iter::once(encoder.finish()));
+
+        smaa_frame.resolve();
         output.present();
 
         Ok(())

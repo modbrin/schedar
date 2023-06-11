@@ -10,13 +10,17 @@
     v loading textures
     v multiple objects
     v loading full sponza
+      separate pipeline from mesh
       proper asset encapsulation in pipeline
-      asset manager
-      use ddx or similar format for textures
+  transparency
+  fps counter
   normal mapping
   antialiasing and filtering
   aabb?
   pbr shader
+  asset manager
+      use ddx or similar format for textures
+      import assets => convert objects and images into internal format (gltf?)
   generalized materials
   transparency and object order
   basic shadows

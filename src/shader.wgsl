@@ -12,7 +12,7 @@ struct Input {
     @location(2) uv: vec2<f32>,
 };
 
-struct Output {
+struct VsOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) v_position: vec4<f32>,
     @location(1) v_normal: vec4<f32>,
@@ -20,8 +20,8 @@ struct Output {
 };
 
 @vertex
-fn vs_main(in: Input) -> Output {
-    var output: Output;
+fn vs_main(in: Input) -> VsOutput {
+    var output: VsOutput;
     let m_position: vec4<f32> = uniforms.model_mat * vec4<f32>(in.pos, 1.0);
     output.v_position = m_position;
     output.v_normal = uniforms.normal_mat * vec4<f32>(in.normal, 1.0);
@@ -50,8 +50,12 @@ struct LightParamUniforms {
 @group(1) @binding(1) var texture_sampler: sampler;
 
 @fragment
-fn fs_main(in: Output) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
     let texture_color: vec4<f32> = textureSample(texture_data, texture_sampler, in.v_uv);
+
+    if texture_color.a < 0.1 {
+        discard;
+    }
 
     let N: vec3<f32> = normalize(in.v_normal.xyz);
     let L: vec3<f32> = normalize(frag_uniforms.light_position.xyz - in.v_position.xyz);
