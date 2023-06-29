@@ -29,23 +29,20 @@ pub fn create_view_projection(
     let view_mat = Matrix4::look_at_rh(camera_position, look_direction, up_direction);
     let project_mat = create_projection(aspect, is_perspective);
     let view_project_mat = project_mat * view_mat;
-
     (view_mat, project_mat, view_project_mat)
 }
 
 pub fn create_transforms(
-    translation: [f32; 3],
-    rotation: [f32; 3],
-    scaling: [f32; 3],
+    translation: Point3<f32>,
+    rotation: Point3<f32>,
+    scaling: Point3<f32>,
 ) -> Matrix4<f32> {
     let trans_mat =
-        Matrix4::from_translation(Vector3::new(translation[0], translation[1], translation[2]));
-    let rotate_mat_x = Matrix4::from_angle_x(Rad(rotation[0]));
-    let rotate_mat_y = Matrix4::from_angle_y(Rad(rotation[1]));
-    let rotate_mat_z = Matrix4::from_angle_z(Rad(rotation[2]));
-    let scale_mat = Matrix4::from_nonuniform_scale(scaling[0], scaling[1], scaling[2]);
-
+        Matrix4::from_translation(Vector3::new(translation.x, translation.y, translation.z));
+    let rotate_mat_x = Matrix4::from_angle_x(Rad(rotation.x));
+    let rotate_mat_y = Matrix4::from_angle_y(Rad(rotation.y));
+    let rotate_mat_z = Matrix4::from_angle_z(Rad(rotation.z));
+    let scale_mat = Matrix4::from_nonuniform_scale(scaling.x, scaling.y, scaling.z);
     let model_mat = trans_mat * rotate_mat_z * rotate_mat_y * rotate_mat_x * scale_mat;
-
     model_mat
 }

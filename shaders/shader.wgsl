@@ -53,7 +53,7 @@ struct LightParamUniforms {
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
     let texture_color: vec4<f32> = textureSample(texture_data, texture_sampler, in.v_uv);
 
-    if texture_color.a < 0.1 {
+    if (texture_color.a < 0.1) {
         discard;
     }
 

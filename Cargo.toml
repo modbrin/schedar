@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 if_chain = "1.0.2"
 wgpu = "0.16"
-cgmath = "0.18"
+cgmath = { git = "https://github.com/rustgd/cgmath" }
 env_logger = "0.10"
 futures = "0.3"
 image = "0.24"
@@ -20,3 +20,6 @@ thiserror = "1.0.40"
 tobj = "4.0.0"
 itertools = "0.10.5"
 smaa = "0.10.0"
+
+[features]
+default = ["cgmath/bytemuck"]

@@ -1,20 +1,24 @@
-use crate::{
-    camera,
-    geometry::{self, CompositeMesh, StaticMesh, Vertex},
-    texture, transforms,
-};
+use crate::{camera, geometry::{self, CompositeMesh, StaticMesh, Vertex}, texture, transforms, utils};
 use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
 use cgmath::{num_traits::clamp, *};
 use std::{iter, path::PathBuf};
+use std::collections::HashMap;
+use std::mem::size_of;
+use std::sync::Arc;
+use wgpu::{BindGroup, BindGroupLayout, include_spirv_raw};
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+use crate::primitives::{Color3f, Vec3f, Transform};
+use crate::transforms::create_transforms;
 
 static WINDOW_TITLE: &str = "Schedar Demo";
+
+const IS_PERSPECTIVE: bool = true;
 
 pub struct InitWgpu {
     pub surface: wgpu::Surface,
@@ -45,7 +49,7 @@ impl InitWgpu {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
-                    features: wgpu::Features::empty(),
+                    features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
                     limits: wgpu::Limits::default(),
                 },
                 None, // api call tracing
@@ -82,90 +86,117 @@ impl InitWgpu {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct Light {
-    specular_color: [f32; 4],
-    ambient_intensity: f32,
-    diffuse_intensity: f32,
-    specular_intensity: f32,
-    specular_shininess: f32,
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DirectionalLight {
+    direction: Vec3f,
+    ambient: Color3f,
+    diffuse: Color3f,
+    specular: Color3f,
 }
 
-pub fn light(sc: [f32; 3], ai: f32, di: f32, si: f32, ss: f32) -> Light {
-    Light {
-        specular_color: [sc[0], sc[1], sc[2], 1.0],
-        ambient_intensity: ai,
-        diffuse_intensity: di,
-        specular_intensity: si,
-        specular_shininess: ss,
-    }
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PointLight {
+    position: Vec3f,
+    ambient: Color3f,
+    diffuse: Color3f,
+    specular: Color3f,
+    constant: f32,
+    linear: f32,
+    quadratic: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SpotLight {
+    position: Vec3f,
+    direction: Color3f,
+    ambient: Color3f,
+    diffuse: Color3f,
+    specular: Color3f,
+    cutoff: f32,
+    outer_cutoff: f32,
+    constant: f32,
+    linear: f32,
+    quadratic: f32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
-    view_project_mat: [[f32; 4]; 4],
+    model: cgmath::Matrix4<f32>,
+    mvp: cgmath::Matrix4<f32>,
+    normal: cgmath::Matrix4<f32>,
+    eye_position: cgmath::Point3<f32>,
 }
 
-const IS_PERSPECTIVE: bool = true;
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LightsUniform {
+    directional_light: DirectionalLight,
+    // spot_light: SpotLight,
+    point_light: PointLight,
+    directional_enabled: u32,
+    // spot_count: u32,
+    point_count: u32,
+}
 
-impl CameraUniform {
-    fn new() -> Self {
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MaterialParams {
+    shininess: f32,
+}
+
+pub struct Actor {
+    static_mesh: CompositeMesh,
+    transform: Transform,
+}
+
+impl Actor {
+    pub fn new(static_mesh: CompositeMesh, transform: Transform) -> Self {
         Self {
-            view_project_mat: cgmath::Matrix4::identity().into(),
+            static_mesh,
+            transform,
         }
     }
-
-    fn update_view_project(&mut self, camera: &camera::Camera, project_mat: Matrix4<f32>) {
-        self.view_project_mat = (project_mat * camera.view_mat()).into()
-    }
 }
 
-pub struct DrawableMesh {
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    indices_num: u32,
-    material_id: usize,
+pub struct DrawableActor {
+    meshes: Vec<DrawableMesh>,
+    textures: Vec<DrawableTexture>,
+}
+
+pub struct MeshPipeline {
     pipeline_layout: wgpu::PipelineLayout,
     pipeline: wgpu::RenderPipeline,
 }
 
-impl DrawableMesh {
+impl MeshPipeline {
     pub fn new(
         device: &wgpu::Device,
-        static_mesh: &StaticMesh,
-        material_id: usize,
-        shader: &wgpu::ShaderModule,
-        config: &wgpu::SurfaceConfiguration,
         camera_bind_group_layout: &wgpu::BindGroupLayout,
+        lights_bind_group_layout: &wgpu::BindGroupLayout,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> DrawableMesh {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: cast_slice(&static_mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: cast_slice(&static_mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        shader_vert: &wgpu::ShaderModule,
+        shader_frag: &wgpu::ShaderModule,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> Self {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &lights_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
+                module: &shader_vert,
+                entry_point: "main",
                 buffers: &[Vertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
+                module: &shader_frag,
+                entry_point: "main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState {
@@ -191,35 +222,63 @@ impl DrawableMesh {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
+        Self {
+            pipeline_layout,
+            pipeline,
+        }
+    }
+}
+
+pub struct DrawableMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    indices_num: u32,
+    material_id: usize,
+}
+
+impl DrawableMesh {
+    pub fn new(
+        device: &wgpu::Device,
+        static_mesh: &StaticMesh,
+        material_id: usize,
+    ) -> DrawableMesh {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: cast_slice(&static_mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: cast_slice(&static_mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
         DrawableMesh {
             vertex_buffer,
             index_buffer,
             material_id,
             indices_num: static_mesh.indices.len() as u32,
-            pipeline_layout,
-            pipeline,
         }
     }
 
-    // TODO: how to fix?
-    pub fn render<'a, 'b: 'a>(
-        &'b self,
-        render_pass: &'a mut wgpu::RenderPass<'a>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        texture_bind_group: &'a wgpu::BindGroup,
-    ) {
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.set_bind_group(0, camera_bind_group, &[]);
-        render_pass.set_bind_group(1, texture_bind_group, &[]);
-        render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
-    }
+    // // TODO: how to fix?
+    // pub fn render<'a, 'b: 'a>(
+    //     &'b self,
+    //     render_pass: &'a mut wgpu::RenderPass<'a>,
+    //     camera_bind_group: &'a wgpu::BindGroup,
+    //     texture_bind_group: &'a wgpu::BindGroup,
+    // ) {
+    //     render_pass.set_pipeline(&self.pipeline);
+    //     render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+    //     render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    //     render_pass.set_bind_group(0, camera_bind_group, &[]);
+    //     render_pass.set_bind_group(1, texture_bind_group, &[]);
+    //     render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
+    // }
 }
 
 struct DrawableTexture {
-    _image_texture: texture::Texture,
-    texture_bind_group_layout: wgpu::BindGroupLayout,
+    params_buffer: wgpu::Buffer,
+    image_texture: texture::Texture,
     texture_bind_group: wgpu::BindGroup,
 }
 
@@ -227,13 +286,14 @@ impl DrawableTexture {
     fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        texture_bind_group_layout: &wgpu::BindGroupLayout,
         material: &geometry::Material,
     ) -> Result<DrawableTexture> {
         let fallback = PathBuf::from("assets/brick.png");
         let path = if let Some(geometry::MaterialParam::Texture(path)) = &material.albedo {
             path
         } else {
-            // return Err(anyhow!("non texture encoutered for albedo"));
+            // return Err(anyhow!("non texture encountered for albedo"));
             &fallback
         };
         let image_texture = texture::Texture::create_texture_data(
@@ -243,46 +303,43 @@ impl DrawableTexture {
             wgpu::AddressMode::Repeat,
             wgpu::AddressMode::Repeat,
         )?;
-        let texture_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("Texture Bind Group Layout"),
-            });
+        let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Material Params Uniform Buffer"),
+            size: size_of::<MaterialParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let material_params = MaterialParams {
+            shininess: 76.8,
+        };
+        queue.write_buffer(
+            &material_params_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[material_params]),
+        );
 
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&image_texture.view),
+                    resource: material_params_uniform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&image_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: wgpu::BindingResource::Sampler(&image_texture.sampler),
                 },
             ],
             label: Some("Texture Bind Group"),
         });
         let result = DrawableTexture {
-            _image_texture: image_texture,
-            texture_bind_group_layout,
+            params_buffer: material_params_uniform_buffer,
+            image_texture,
             texture_bind_group,
         };
         Ok(result)
@@ -292,78 +349,71 @@ impl DrawableTexture {
 struct State {
     pub init: InitWgpu,
 
-    models: Vec<DrawableMesh>,
-    textures: Vec<DrawableTexture>,
+    // scene entities
+    drawable_actors: HashMap<Arc<str>, DrawableActor>,
+    // shaders: HashMap<Arc<str>, wgpu::ShaderModule>,
+    shader_vert: wgpu::ShaderModule,
+    shader_frag: wgpu::ShaderModule,
+    pipeline: MeshPipeline,
+    texture_bind_group_layout: BindGroupLayout,
 
     // camera
     camera: camera::Camera,
     projection: Matrix4<f32>,
     camera_controller: camera::CameraController,
-    camera_uniform: CameraUniform,
+    camera_uniform_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     mouse_pressed: bool,
 
+    // light
+    lights_uniform_buffer: wgpu::Buffer,
+    lights_bind_group: BindGroup,
+    light_position: Vec3f,
+    going_backwards: bool,
+
     // smaa
     smaa_target: smaa::SmaaTarget,
-
-    // light
-    vs_uniform_buffer: wgpu::Buffer,
-    fs_uniform_buffer: wgpu::Buffer,
-    _light_uniform_buffer: wgpu::Buffer,
-    light_position: Point3<f32>,
-    going_backwards: bool,
 }
 
 impl State {
-    async fn new(window: &Window, mesh: &CompositeMesh, light_data: Light) -> Result<Self> {
+    async fn new(window: &Window) -> Result<Self> {
         let init = InitWgpu::init_wgpu(window).await?;
 
-        let mut drawable_meshes = Vec::new();
-        let mut drawable_textures = Vec::new();
-
-        let shader = init
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-            });
+        // fixme: strange problem with passing of vector into shader - they're broken
 
         let camera = camera::Camera::new((0.0, 10.0, 0.0), cgmath::Deg(-20.0), cgmath::Deg(0.0));
         let camera_controller = camera::CameraController::new(0.3, 30.0);
         let aspect = init.config.width as f32 / init.config.height as f32;
         let projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
 
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_project(&camera, projection);
-
-        // stores model_mal and view_projection_mat
-        let vs_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Uniform Buffer"),
-            size: 192,
+        // stores model and mvp matrix
+        let camera_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera Uniform Buffer"),
+            size: size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         // stores light_position and eye_position
-        let fs_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Fragment Uniform Buffer"),
-            size: 32,
+        let lights_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lights Uniform Buffer"),
+            size: size_of::<LightsUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let light_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Light Uniform Buffer"),
-            size: 48,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // let light_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
+        //     label: Some("Light Uniform Buffer"),
+        //     size: 48,
+        //     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        //     mapped_at_creation: false,
+        // });
 
-        init.queue.write_buffer(
-            &light_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[light_data]),
-        );
+        // init.queue.write_buffer(
+        //     &light_uniform_buffer,
+        //     0,
+        //     bytemuck::cast_slice(&[light_data]),
+        // );
 
         let camera_bind_group_layout =
             init.device
@@ -372,26 +422,6 @@ impl State {
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
@@ -408,43 +438,75 @@ impl State {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: vs_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: fs_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: light_uniform_buffer.as_entire_binding(),
+                    resource: camera_uniform_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Camera Bind Group"),
         });
 
-        for material in mesh.materials.iter() {
-            let t = DrawableTexture::new(&init.device, &init.queue, material)?;
-            drawable_textures.push(t);
-        }
+        let lights_bind_group_layout = init.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("Lights Bind Group Layout"),
+        });
 
-        for (static_mesh, mat_id) in mesh.components.iter() {
-            if let Some(mat_id) = *mat_id {
-                let texture_bind_group_layout =
-                    &drawable_textures[mat_id].texture_bind_group_layout;
-                let m = DrawableMesh::new(
-                    &init.device,
-                    static_mesh,
-                    mat_id,
-                    &shader,
-                    &init.config,
-                    &camera_bind_group_layout,
-                    texture_bind_group_layout,
-                );
-                drawable_meshes.push(m);
-            } else {
-                println!("encountered mesh without referenced texture");
-            }
-        }
+        let lights_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &lights_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lights_uniform_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Lights Bind Group"),
+        });
+
+        let texture_bind_group_layout =
+            init.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Texture Bind Group Layout"),
+            });
+
+        let (shader_vert, shader_frag) = utils::load_spirv_shader(&init.device, "todo");
+
+        let pipeline = MeshPipeline::new(&init.device, &camera_bind_group_layout, &lights_bind_group_layout, &texture_bind_group_layout, &shader_vert, &shader_frag, &init.config);
 
         let mut smaa_target = smaa::SmaaTarget::new(
             &init.device,
@@ -457,23 +519,66 @@ impl State {
 
         let result = Self {
             init,
-            models: drawable_meshes,
-            textures: drawable_textures,
+            drawable_actors: HashMap::new(),
+            shader_vert,
+            shader_frag,
+            pipeline,
+            texture_bind_group_layout,
             camera,
             projection,
             camera_controller,
             camera_bind_group,
-            camera_uniform,
-            vs_uniform_buffer,
-            fs_uniform_buffer,
+            camera_uniform_buffer,
+            lights_uniform_buffer,
+            lights_bind_group,
             smaa_target,
-            _light_uniform_buffer: light_uniform_buffer,
             mouse_pressed: false,
-            light_position: Point3::new(0.0, 10.0, 0.0),
+            light_position: Vec3f::new(0.0, 10.0, 0.0),
             going_backwards: false,
         };
         Ok(result)
     }
+
+    pub fn spawn_actor(&mut self, name: Arc<str>, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
+        if self.drawable_actors.contains_key(&name) {
+            return Err(anyhow!("asset with given name already spawned"));
+        }
+        let mut meshes = Vec::new();
+        let mut textures = Vec::new();
+        for (static_mesh, mat_id) in actor.static_mesh.components.iter() {
+            if let Some(mat_id) = *mat_id {
+                let mesh = DrawableMesh::new(
+                    &self.init.device,
+                    static_mesh,
+                    mat_id,
+                );
+                meshes.push(mesh);
+            } else {
+                println!("encountered mesh without referenced texture");
+            }
+        }
+        for mat in actor.static_mesh.materials.iter() {
+            let tex = DrawableTexture::new(
+                &self.init.device,
+                &self.init.queue,
+                &self.texture_bind_group_layout,
+                mat,
+            )?;
+            textures.push(tex)
+        }
+        let actor = DrawableActor {
+            meshes,
+            textures,
+        };
+        self.drawable_actors.insert(name, actor);
+        Ok(())
+    }
+
+    // pub fn add_shader(&mut self, name: Arc<str>, _path: Arc<str>) -> Result<()> {
+    //
+    //     self.shaders.insert(name.clone(), shader);
+    //     Ok(())
+    // }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
@@ -527,50 +632,52 @@ impl State {
             self.light_position.x += dt * 50.0;
         }
 
-        // camera update
-        self.camera_controller.update_camera(&mut self.camera, dt);
-        self.camera_uniform
-            .update_view_project(&self.camera, self.projection);
-
-        // model + normal
+        // update camera uniform
         let model_mat =
-            transforms::create_transforms([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.1, 0.1, 0.1]);
+            transforms::create_transforms([0.0, 0.0, 0.0].into(), [0.0, 0.0, 0.0].into(), [0.1, 0.1, 0.1].into());
+        self.camera_controller.update_camera(&mut self.camera, dt);
         let normal_mat = model_mat
             .invert()
             .ok_or_else(|| anyhow!("matrix is not invertible"))
             .unwrap()
             .transpose();
-        let model_ref: &[f32; 16] = model_mat.as_ref();
-        let normal_ref: &[f32; 16] = normal_mat.as_ref();
-
-        // write vert shader data
+        let camera_uniform = CameraUniform {
+            model: model_mat,
+            mvp: self.projection * self.camera.view_mat() * model_mat,
+            normal: normal_mat,
+            eye_position: self.camera.position,
+        };
         self.init
             .queue
-            .write_buffer(&self.vs_uniform_buffer, 0, bytemuck::cast_slice(model_ref));
-        self.init.queue.write_buffer(
-            &self.vs_uniform_buffer,
-            64,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
-        self.init.queue.write_buffer(
-            &self.vs_uniform_buffer,
-            128,
-            bytemuck::cast_slice(normal_ref),
-        );
+            .write_buffer(&self.camera_uniform_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
-        // write frag shader data
-        let light_position: &[f32; 3] = self.light_position.as_ref();
-        let eye_position: &[f32; 3] = self.camera.position.as_ref();
+        // update lights uniform
+        let directional_light = DirectionalLight {
+            direction: Vec3f::new(1.0, 0.0, 0.0),
+            ambient: Color3f::new(1.0, 1.0, 1.0),
+            diffuse: Color3f::new(1.0, 1.0, 1.0),
+            specular: Color3f::new(1.0, 1.0, 1.0),
+        };
+        let point_light = PointLight {
+            position: self.light_position,
+            ambient: Color3f::new(1.0, 1.0, 1.0),
+            diffuse: Color3f::new(1.0, 1.0, 1.0),
+            specular: Color3f::new(1.0, 1.0, 1.0),
+            constant: 1.0,
+            linear: 0.09,
+            quadratic: 0.032,
+        };
+        let light_data = LightsUniform {
+            directional_light,
+            point_light,
+            directional_enabled: 1,
+            point_count: 1,
+        };
         self.init.queue.write_buffer(
-            &self.fs_uniform_buffer,
+            &self.lights_uniform_buffer,
             0,
-            bytemuck::cast_slice(light_position),
-        );
-        self.init.queue.write_buffer(
-            &self.fs_uniform_buffer,
-            16,
-            bytemuck::cast_slice(eye_position),
-        );
+            bytemuck::cast_slice(&[light_data]),
+        )
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -632,23 +739,22 @@ impl State {
                 }),
             });
 
-            for model in self.models.iter() {
-                // model.render(
-                //     &mut render_pass,
-                //     &self.camera_bind_group,
-                //     &self.textures[model.material_id].texture_bind_group,
-                // )
-                render_pass.set_pipeline(&model.pipeline);
-                render_pass.set_vertex_buffer(0, model.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_bind_group(
-                    1,
-                    &self.textures[model.material_id].texture_bind_group,
-                    &[],
-                );
-                render_pass.draw_indexed(0..model.indices_num, 0, 0..1);
+            render_pass.set_pipeline(&self.pipeline.pipeline);
+
+            for (_, actor) in self.drawable_actors.iter() {
+                for mesh in actor.meshes.iter() {
+                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    render_pass
+                        .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    render_pass.set_bind_group(1, &self.lights_bind_group, &[]);
+                    render_pass.set_bind_group(
+                        2,
+                        &actor.textures[mesh.material_id].texture_bind_group,
+                        &[],
+                    );
+                    render_pass.draw_indexed(0..mesh.indices_num, 0, 0..1);
+                }
             }
         }
 
@@ -661,12 +767,16 @@ impl State {
     }
 }
 
-pub fn run(mesh: &CompositeMesh, light_data: Light) -> Result<()> {
+pub fn run(actors: &[(Arc<str>, &Actor)]) -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop)?;
     window.set_title(WINDOW_TITLE);
-    let mut state = pollster::block_on(State::new(&window, mesh, light_data))?;
+    let mut state = pollster::block_on(State::new(&window))?;
+
+    for (name, actor) in actors {
+        state.spawn_actor(name.clone(), actor, "todo".into())?;
+    }
 
     let mut render_start_time = std::time::Instant::now();
 

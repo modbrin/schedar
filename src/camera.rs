@@ -89,3 +89,7 @@ impl CameraController {
         camera.pitch = clamp(camera.pitch, -bound, bound);
     }
 }
+
+pub struct CameraInstance {
+
+}

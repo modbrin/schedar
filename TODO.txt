@@ -1,4 +1,4 @@
-  first steps
+v first steps
     v textured cube
     v fix camera
     v fps flying movement
@@ -10,20 +10,35 @@
     v loading textures
     v multiple objects
     v loading full sponza
+    V transition to glsl
+    v fix glsl data passing bug
+      add lights container
       separate pipeline from mesh
       proper asset encapsulation in pipeline
-  transparency
-  fps counter
-  normal mapping
-  antialiasing and filtering
-  aabb?
-  pbr shader
+  add normal mapping
+  make lights array and enable blending render as many lights as possible
+  add fps counter
+  enable antialiasing and filtering
+    v add smaa
+      add taa
+      add amd fsr
+  implement pbr shader
+      find articles to study how to implement it
+  add transparent objects
+      add render ordering
+  basic shadows
   asset manager
       use ddx or similar format for textures
       import assets => convert objects and images into internal format (gltf?)
+  editor features
+      select object
+      draw handle arrow
+      draw objects
   generalized materials
+      render graphs?
+      how to compose shaders?
+  aabb?
   transparency and object order
-  basic shadows
   dynamic light and multiple lights
   basic collision and physics
   scene manager
@@ -32,6 +47,7 @@
   tetris demo
   debug gui
   animation
+  procedural animation and physical animation
   in-game gui
   scene editor
   audio engine
