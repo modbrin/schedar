@@ -22,12 +22,7 @@ impl Texture {
     ) -> Result<Self> {
         let path = img_file.as_ref();
         let img = ImageReader::open(path)?.decode()?.flipv();
-        let rgba = img.to_rgba8(); //.as_rgba8().ok_or_else(|| {
-                                   //     EngineError::asset(
-                                   //         path.as_os_str().to_str().unwrap_or("unknown"),
-                                   //         "only rgba8 textures are supported",
-                                   //     )
-                                   // })?;
+        let rgba = img.to_rgba8();
         let dimensions = img.dimensions();
 
         let size = wgpu::Extent3d {

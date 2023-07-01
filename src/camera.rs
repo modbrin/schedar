@@ -1,13 +1,15 @@
-use cgmath::{num_traits::clamp, *};
+use bytemuck::Zeroable;
+use glam::*;
+use num::clamp;
 
 pub struct Camera {
-    pub position: Point3<f32>,
-    yaw: Rad<f32>,
-    pitch: Rad<f32>,
+    pub position: Vec3,
+    yaw: f32,
+    pitch: f32,
 }
 
 impl Camera {
-    pub fn new<Pos: Into<Point3<f32>>, Yaw: Into<Rad<f32>>, Pitch: Into<Rad<f32>>>(
+    pub fn new<Pos: Into<Vec3>, Yaw: Into<f32>, Pitch: Into<f32>>(
         position: Pos,
         yaw: Yaw,
         pitch: Pitch,
@@ -19,13 +21,13 @@ impl Camera {
         }
     }
 
-    pub fn view_mat(&self) -> Matrix4<f32> {
+    pub fn view_mat(&self) -> Mat4 {
         let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
         let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
-        Matrix4::look_to_rh(
+        Mat4::look_to_rh(
             self.position,
-            Vector3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize(),
-            Vector3::unit_y(),
+            Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize(),
+            Vec3::new(0.0, 1.0, 0.0),
         )
     }
 }
@@ -34,8 +36,8 @@ pub struct CameraController {
     rotate_delta_x: f32,
     rotate_delta_y: f32,
     rotate_speed: f32,
-    raw_movement_input: Vector3<f32>,
-    movement_input: Vector3<f32>,
+    raw_movement_input: Vec3,
+    movement_input: Vec3,
     movement_speed: f32,
 }
 
@@ -45,8 +47,8 @@ impl CameraController {
             rotate_delta_x: 0.0,
             rotate_delta_y: 0.0,
             rotate_speed,
-            raw_movement_input: Vector3::zero(),
-            movement_input: Vector3::zero(),
+            raw_movement_input: Vec3::zeroed(),
+            movement_input: Vec3::zeroed(),
             movement_speed,
         }
     }
@@ -58,38 +60,30 @@ impl CameraController {
 
     /// Non-normalized input vector
     /// z - forward/backward, y - up/down, x - left/right
-    pub fn set_movement_input(&mut self, raw_input: Vector3<f32>) {
+    pub fn set_movement_input(&mut self, raw_input: Vec3) {
         self.raw_movement_input = raw_input;
-        if raw_input.is_zero() {
-            self.movement_input = Vector3::zero();
-        } else {
-            self.movement_input = raw_input.normalize();
-        }
+        self.movement_input = raw_input.normalize_or_zero();
     }
 
-    pub fn get_movement_input(&mut self) -> Vector3<f32> {
+    pub fn get_movement_input(&mut self) -> Vec3 {
         self.raw_movement_input
     }
 
     pub fn update_camera(&mut self, camera: &mut Camera, dt: f32) {
-        camera.yaw += Rad(self.rotate_delta_x) * self.rotate_speed * dt;
-        camera.pitch += Rad(-self.rotate_delta_y) * self.rotate_speed * dt;
+        camera.yaw += self.rotate_delta_x * self.rotate_speed * dt;
+        camera.pitch += -self.rotate_delta_y * self.rotate_speed * dt;
 
         self.rotate_delta_x = 0.0;
         self.rotate_delta_y = 0.0;
 
-        let forward = Vector3::new(camera.yaw.cos(), 0.0, camera.yaw.sin()).normalize();
-        let right = Vector3::new(-camera.yaw.sin(), 0.0, camera.yaw.cos()).normalize();
+        let forward = Vec3::new(camera.yaw.cos(), 0.0, camera.yaw.sin()).normalize();
+        let right = Vec3::new(-camera.yaw.sin(), 0.0, camera.yaw.cos()).normalize();
 
         camera.position += forward * self.movement_input.y * self.movement_speed * dt;
         camera.position += right * self.movement_input.x * self.movement_speed * dt;
         camera.position.y += self.movement_input.z * self.movement_speed * dt;
 
-        let bound: Rad<f32> = Deg(89.0).into();
+        let bound: f32 = 89.0f32.to_radians();
         camera.pitch = clamp(camera.pitch, -bound, bound);
     }
-}
-
-pub struct CameraInstance {
-
 }

@@ -6,8 +6,8 @@ layout (location = 1) in vec3 ourFragPos;
 layout (location = 2) in vec3 ourNormal;
 layout (location = 3) in vec2 ourTexCoord;
 
-#define NR_POINT_LIGHTS 8
-#define NR_SPOT_LIGHTS 8
+#define NR_POINT_LIGHTS 4
+#define NR_SPOT_LIGHTS 4
 
 struct DirectionalLight {
     vec3 direction;
@@ -43,9 +43,9 @@ layout(set = 1, binding = 0) uniform Lights {
     DirectionalLight directionalLight;
 //    SpotLight spotLight;
     PointLight pointLights[NR_POINT_LIGHTS];
-    PointLight pointLight;
-    uint directionalEnabled;
+//    PointLight pointLight;
 //    uint spotCount;
+    uint directionalEnabled;
     uint pointCount;
 } lights;
 
@@ -94,7 +94,7 @@ vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
     vec3 reflectDir = reflect(-lightDir, normal);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), materialParams.shininess);
 
-    float distance    = length(light.position - fragPos);
+    float distance = length(light.position - fragPos);
     float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));
 
     vec3 diffuseTex = vec3(texture(sampler2D(texture_diffuse1, sampler_diffuse1), ourTexCoord));

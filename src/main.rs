@@ -1,15 +1,15 @@
-use geometry::CompositeMesh;
 use crate::common::Actor;
 use crate::primitives::Transform;
+use geometry::CompositeMesh;
 
 mod camera;
 mod common;
 mod error;
 mod geometry;
+mod primitives;
 mod texture;
 mod transforms;
 mod utils;
-mod primitives;
 
 fn main() {
     let sponza_mesh = CompositeMesh::load_from_file("../Sponza/sponza.obj").unwrap();

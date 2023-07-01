@@ -1,20 +1,25 @@
-use crate::{camera, geometry::{self, CompositeMesh, StaticMesh, Vertex}, texture, transforms, utils};
+use crate::primitives::{AsUniformBufferBytes, Transform};
+use crate::transforms::create_transforms;
+use crate::{
+    camera,
+    geometry::{self, CompositeMesh, StaticMesh, Vertex},
+    texture, transforms, utils,
+};
 use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
-use cgmath::{num_traits::clamp, *};
-use std::{iter, path::PathBuf};
+use encase::{ShaderType, UniformBuffer};
+use glam::*;
+use num::clamp;
 use std::collections::HashMap;
-use std::mem::size_of;
 use std::sync::Arc;
-use wgpu::{BindGroup, BindGroupLayout, include_spirv_raw};
+use std::{iter, path::PathBuf};
 use wgpu::util::DeviceExt;
+use wgpu::{include_spirv_raw, BindGroup, BindGroupLayout};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
-use crate::primitives::{Color3f, Vec3f, Transform};
-use crate::transforms::create_transforms;
 
 static WINDOW_TITLE: &str = "Schedar Demo";
 
@@ -85,35 +90,32 @@ impl InitWgpu {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct DirectionalLight {
-    direction: Vec3f,
-    ambient: Color3f,
-    diffuse: Color3f,
-    specular: Color3f,
+    direction: Vec3,
+    ambient: Vec3,
+    diffuse: Vec3,
+    specular: Vec3,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct PointLight {
-    position: Vec3f,
-    ambient: Color3f,
-    diffuse: Color3f,
-    specular: Color3f,
+    position: Vec3,
+    ambient: Vec3,
+    diffuse: Vec3,
+    specular: Vec3,
     constant: f32,
     linear: f32,
     quadratic: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct SpotLight {
-    position: Vec3f,
-    direction: Color3f,
-    ambient: Color3f,
-    diffuse: Color3f,
-    specular: Color3f,
+    position: Vec3,
+    direction: Vec3,
+    ambient: Vec3,
+    diffuse: Vec3,
+    specular: Vec3,
     cutoff: f32,
     outer_cutoff: f32,
     constant: f32,
@@ -121,28 +123,25 @@ struct SpotLight {
     quadratic: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct CameraUniform {
-    model: cgmath::Matrix4<f32>,
-    mvp: cgmath::Matrix4<f32>,
-    normal: cgmath::Matrix4<f32>,
-    eye_position: cgmath::Point3<f32>,
+    model: Mat4,
+    mvp: Mat4,
+    normal: Mat4,
+    eye_position: Vec3,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct LightsUniform {
     directional_light: DirectionalLight,
     // spot_light: SpotLight,
-    point_light: PointLight,
+    point_lights: [PointLight; 4],
     directional_enabled: u32,
     // spot_count: u32,
     point_count: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Default, ShaderType)]
 struct MaterialParams {
     shininess: f32,
 }
@@ -183,7 +182,11 @@ impl MeshPipeline {
     ) -> Self {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &lights_bind_group_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[
+                &camera_bind_group_layout,
+                &lights_bind_group_layout,
+                &texture_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -305,18 +308,16 @@ impl DrawableTexture {
         )?;
         let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Material Params Uniform Buffer"),
-            size: size_of::<MaterialParams>() as u64,
+            size: MaterialParams::default().size().get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let material_params = MaterialParams {
-            shininess: 76.8,
-        };
+        let material_params = MaterialParams { shininess: 76.8 };
         queue.write_buffer(
             &material_params_uniform_buffer,
             0,
-            bytemuck::cast_slice(&[material_params]),
+            &material_params.as_uniform_buffer_bytes(),
         );
 
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -359,7 +360,7 @@ struct State {
 
     // camera
     camera: camera::Camera,
-    projection: Matrix4<f32>,
+    projection: Mat4,
     camera_controller: camera::CameraController,
     camera_uniform_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -368,7 +369,7 @@ struct State {
     // light
     lights_uniform_buffer: wgpu::Buffer,
     lights_bind_group: BindGroup,
-    light_position: Vec3f,
+    light_position: Vec3,
     going_backwards: bool,
 
     // smaa
@@ -379,9 +380,8 @@ impl State {
     async fn new(window: &Window) -> Result<Self> {
         let init = InitWgpu::init_wgpu(window).await?;
 
-        // fixme: strange problem with passing of vector into shader - they're broken
-
-        let camera = camera::Camera::new((0.0, 10.0, 0.0), cgmath::Deg(-20.0), cgmath::Deg(0.0));
+        let camera =
+            camera::Camera::new((0.0, 10.0, 0.0), -20.0f32.to_radians(), 0.0f32.to_radians());
         let camera_controller = camera::CameraController::new(0.3, 30.0);
         let aspect = init.config.width as f32 / init.config.height as f32;
         let projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
@@ -389,7 +389,7 @@ impl State {
         // stores model and mvp matrix
         let camera_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Uniform Buffer"),
-            size: size_of::<CameraUniform>() as u64,
+            size: CameraUniform::default().size().get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -397,84 +397,40 @@ impl State {
         // stores light_position and eye_position
         let lights_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lights Uniform Buffer"),
-            size: size_of::<LightsUniform>() as u64,
+            size: LightsUniform::default().size().get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // let light_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
-        //     label: Some("Light Uniform Buffer"),
-        //     size: 48,
-        //     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        //     mapped_at_creation: false,
-        // });
-
-        // init.queue.write_buffer(
-        //     &light_uniform_buffer,
-        //     0,
-        //     bytemuck::cast_slice(&[light_data]),
-        // );
-
         let camera_bind_group_layout =
             init.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                    ],
+                        count: None,
+                    }],
                     label: Some("Camera Bind Group Layout"),
                 });
 
         let camera_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_uniform_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            }],
             label: Some("Camera Bind Group"),
         });
 
-        let lights_bind_group_layout = init.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-            label: Some("Lights Bind Group Layout"),
-        });
-
-        let lights_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &lights_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: lights_uniform_buffer.as_entire_binding(),
-                },
-            ],
-            label: Some("Lights Bind Group"),
-        });
-
-        let texture_bind_group_layout =
-            init.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
+        let lights_bind_group_layout =
+            init.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
@@ -483,30 +439,64 @@ impl State {
                             min_binding_size: None,
                         },
                         count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    }],
+                    label: Some("Lights Bind Group Layout"),
+                });
+
+        let lights_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &lights_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lights_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("Lights Bind Group"),
+        });
+
+        let texture_bind_group_layout =
+            init.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("Texture Bind Group Layout"),
-            });
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                    label: Some("Texture Bind Group Layout"),
+                });
 
         let (shader_vert, shader_frag) = utils::load_spirv_shader(&init.device, "todo");
 
-        let pipeline = MeshPipeline::new(&init.device, &camera_bind_group_layout, &lights_bind_group_layout, &texture_bind_group_layout, &shader_vert, &shader_frag, &init.config);
+        let pipeline = MeshPipeline::new(
+            &init.device,
+            &camera_bind_group_layout,
+            &lights_bind_group_layout,
+            &texture_bind_group_layout,
+            &shader_vert,
+            &shader_frag,
+            &init.config,
+        );
 
         let mut smaa_target = smaa::SmaaTarget::new(
             &init.device,
@@ -533,13 +523,18 @@ impl State {
             lights_bind_group,
             smaa_target,
             mouse_pressed: false,
-            light_position: Vec3f::new(0.0, 10.0, 0.0),
+            light_position: Vec3::new(0.0, 10.0, 0.0),
             going_backwards: false,
         };
         Ok(result)
     }
 
-    pub fn spawn_actor(&mut self, name: Arc<str>, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
+    pub fn spawn_actor(
+        &mut self,
+        name: Arc<str>,
+        actor: &Actor,
+        shader_name: Arc<str>,
+    ) -> Result<()> {
         if self.drawable_actors.contains_key(&name) {
             return Err(anyhow!("asset with given name already spawned"));
         }
@@ -547,11 +542,7 @@ impl State {
         let mut textures = Vec::new();
         for (static_mesh, mat_id) in actor.static_mesh.components.iter() {
             if let Some(mat_id) = *mat_id {
-                let mesh = DrawableMesh::new(
-                    &self.init.device,
-                    static_mesh,
-                    mat_id,
-                );
+                let mesh = DrawableMesh::new(&self.init.device, static_mesh, mat_id);
                 meshes.push(mesh);
             } else {
                 println!("encountered mesh without referenced texture");
@@ -566,10 +557,7 @@ impl State {
             )?;
             textures.push(tex)
         }
-        let actor = DrawableActor {
-            meshes,
-            textures,
-        };
+        let actor = DrawableActor { meshes, textures };
         self.drawable_actors.insert(name, actor);
         Ok(())
     }
@@ -633,50 +621,56 @@ impl State {
         }
 
         // update camera uniform
-        let model_mat =
-            transforms::create_transforms([0.0, 0.0, 0.0].into(), [0.0, 0.0, 0.0].into(), [0.1, 0.1, 0.1].into());
+        let model_mat = transforms::create_transforms(
+            [0.0, 0.0, 0.0].into(),
+            [0.0, 0.0, 0.0].into(),
+            [0.1, 0.1, 0.1].into(),
+        );
         self.camera_controller.update_camera(&mut self.camera, dt);
-        let normal_mat = model_mat
-            .invert()
-            .ok_or_else(|| anyhow!("matrix is not invertible"))
-            .unwrap()
-            .transpose();
+        let normal_mat = model_mat.inverse().transpose();
         let camera_uniform = CameraUniform {
             model: model_mat,
             mvp: self.projection * self.camera.view_mat() * model_mat,
             normal: normal_mat,
             eye_position: self.camera.position,
         };
-        self.init
-            .queue
-            .write_buffer(&self.camera_uniform_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
+        self.init.queue.write_buffer(
+            &self.camera_uniform_buffer,
+            0,
+            &camera_uniform.as_uniform_buffer_bytes(),
+        );
 
         // update lights uniform
         let directional_light = DirectionalLight {
-            direction: Vec3f::new(1.0, 0.0, 0.0),
-            ambient: Color3f::new(1.0, 1.0, 1.0),
-            diffuse: Color3f::new(1.0, 1.0, 1.0),
-            specular: Color3f::new(1.0, 1.0, 1.0),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            ambient: Vec3::new(1.0, 1.0, 1.0),
+            diffuse: Vec3::new(1.0, 1.0, 1.0),
+            specular: Vec3::new(1.0, 1.0, 1.0),
         };
         let point_light = PointLight {
             position: self.light_position,
-            ambient: Color3f::new(1.0, 1.0, 1.0),
-            diffuse: Color3f::new(1.0, 1.0, 1.0),
-            specular: Color3f::new(1.0, 1.0, 1.0),
+            ambient: Vec3::new(1.0, 1.0, 1.0),
+            diffuse: Vec3::new(1.0, 1.0, 1.0),
+            specular: Vec3::new(1.0, 1.0, 1.0),
             constant: 1.0,
             linear: 0.09,
             quadratic: 0.032,
         };
         let light_data = LightsUniform {
             directional_light,
-            point_light,
             directional_enabled: 1,
+            point_lights: [
+                point_light,
+                PointLight::default(),
+                PointLight::default(),
+                PointLight::default(),
+            ],
             point_count: 1,
         };
         self.init.queue.write_buffer(
             &self.lights_uniform_buffer,
             0,
-            bytemuck::cast_slice(&[light_data]),
+            &light_data.as_uniform_buffer_bytes(),
         )
     }
 
