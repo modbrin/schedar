@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
+use glam::*;
 use itertools::{izip, Itertools};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -7,7 +8,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::{mem, path::Path};
 
-const TEXTURE_NOT_FOUND_COLOR: [f32; 3] = [0.99, 0.01, 0.65];
+/// Bright purple color to visualise missing texture
+pub const DIFFUSE_TEX_FALLBACK_COLOR: Vec3 = Vec3::new(0.99, 0.01, 0.65);
+/// Blue flat for default (model-space) normal
+pub const NORMAL_TEX_FALLBACK_COLOR: Vec3 = Vec3::new(0.0, 0.0, 1.0);
+/// Black for no specular
+pub const SPECULAR_TEX_FALLBACK_COLOR: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+/// Block for no emission
+pub const EMISSION_TEX_FALLBACK_COLOR: Vec3 = Vec3::new(0.0, 0.0, 0.0);
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -41,19 +49,20 @@ pub struct Material {
     pub ambient_occlusion: Option<MaterialParam>,
     pub refraction: Option<MaterialParam>,
     pub emission: Option<MaterialParam>,
+    pub shininess: Option<MaterialParam>,
 }
 
 #[derive(Debug, Clone)]
 pub enum MaterialParam {
     Texture(PathBuf),
-    Color([f32; 3]),
+    Color(Vec3),
     Scalar(f32),
 }
 
 impl MaterialParam {
     pub fn expect_texture(mut base_path: PathBuf, local_path: &str) -> Self {
         match Self::texture_or_none(base_path, local_path) {
-            None => MaterialParam::Color(TEXTURE_NOT_FOUND_COLOR),
+            None => MaterialParam::Color(DIFFUSE_TEX_FALLBACK_COLOR),
             Some(tex) => tex,
         }
     }
@@ -103,19 +112,35 @@ impl CompositeMesh {
             let mut base_path = path.to_path_buf();
             base_path.pop();
             for mat in materials.iter() {
-                let albedo = match (&mat.ambient, &mat.ambient_texture) {
+                let albedo = match (&mat.diffuse, &mat.diffuse_texture) {
                     (_, Some(local_path)) => {
-                        MaterialParam::expect_texture(base_path.clone(), local_path)
+                        Some(MaterialParam::expect_texture(base_path.clone(), local_path))
                     }
-                    (Some(col), None) => MaterialParam::Color(*col),
-                    _ => MaterialParam::Color(TEXTURE_NOT_FOUND_COLOR),
+                    (Some(col), None) => Some(MaterialParam::Color(Vec3::from_slice(col))),
+                    _ => Some(MaterialParam::Color(DIFFUSE_TEX_FALLBACK_COLOR)),
                 };
                 let normal = mat.normal_texture.as_ref().and_then(|local_path| {
                     MaterialParam::texture_or_none(base_path.clone(), &local_path)
                 });
+                let specular = match (&mat.specular, &mat.specular_texture) {
+                    (_, Some(local_path)) => {
+                        MaterialParam::texture_or_none(base_path.clone(), local_path)
+                    }
+                    (Some(col), None) => Some(MaterialParam::Color(Vec3::from_slice(col))),
+                    _ => None,
+                };
+                let shininess = match (&mat.shininess, &mat.shininess_texture) {
+                    (_, Some(local_path)) => {
+                        MaterialParam::texture_or_none(base_path.clone(), local_path)
+                    }
+                    (Some(col), None) => Some(MaterialParam::Scalar(*col)),
+                    _ => None,
+                };
                 let out = Material {
-                    albedo: Some(albedo),
+                    albedo,
                     normal,
+                    specular,
+                    shininess,
                     ..Default::default()
                 };
                 out_materials.push(out);

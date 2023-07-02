@@ -1,20 +1,21 @@
 use crate::primitives::{AsUniformBufferBytes, Transform};
-use crate::transforms::create_transforms;
 use crate::{
     camera,
-    geometry::{self, CompositeMesh, StaticMesh, Vertex},
-    texture, transforms, utils,
+    geometry::{self, CompositeMesh, MaterialParam, StaticMesh, Vertex},
+    texture,
+    transforms::{self, create_transforms},
+    utils,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
 use encase::{ShaderType, UniformBuffer};
 use glam::*;
 use num::clamp;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 use std::{iter, path::PathBuf};
 use wgpu::util::DeviceExt;
-use wgpu::{include_spirv_raw, BindGroup, BindGroupLayout};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -279,71 +280,138 @@ impl DrawableMesh {
     // }
 }
 
+#[derive(Default)]
+struct DrawableImageTextures {
+    albedo: Option<texture::Texture>,
+    normal: Option<texture::Texture>,
+    specular: Option<texture::Texture>,
+    emission: Option<texture::Texture>,
+}
+
 struct DrawableTexture {
     params_buffer: wgpu::Buffer,
-    image_texture: texture::Texture,
+    // image_texture: texture::Texture,
     texture_bind_group: wgpu::BindGroup,
 }
 
 impl DrawableTexture {
-    fn new(
+    pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
         material: &geometry::Material,
     ) -> Result<DrawableTexture> {
-        let fallback = PathBuf::from("assets/brick.png");
-        let path = if let Some(geometry::MaterialParam::Texture(path)) = &material.albedo {
-            path
-        } else {
-            // return Err(anyhow!("non texture encountered for albedo"));
-            &fallback
-        };
-        let image_texture = texture::Texture::create_texture_data(
-            device,
-            queue,
-            path.as_path(),
-            wgpu::AddressMode::Repeat,
-            wgpu::AddressMode::Repeat,
-        )?;
+        let mut bind_entries = Vec::new();
+        let mut material_params = MaterialParams { shininess: 76.8 };
         let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Material Params Uniform Buffer"),
-            size: MaterialParams::default().size().get(),
+            size: material_params.size().get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let material_params = MaterialParams { shininess: 76.8 };
+        // push to front to reserve space
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: material_params_uniform_buffer.as_entire_binding(),
+        });
+        let mut image_textures = DrawableImageTextures::default();
+        Self::prepare_bind_entries(
+            device,
+            queue,
+            &mut bind_entries,
+            &mut image_textures.albedo,
+            material.albedo.as_ref(),
+            1,
+            geometry::DIFFUSE_TEX_FALLBACK_COLOR,
+        )?;
+        Self::prepare_bind_entries(
+            device,
+            queue,
+            &mut bind_entries,
+            &mut image_textures.specular,
+            material.specular.as_ref(),
+            5,
+            geometry::SPECULAR_TEX_FALLBACK_COLOR,
+        )?;
+        Self::prepare_bind_entries(
+            device,
+            queue,
+            &mut bind_entries,
+            &mut image_textures.normal,
+            material.normal.as_ref(),
+            9,
+            geometry::NORMAL_TEX_FALLBACK_COLOR,
+        )?;
+        Self::prepare_bind_entries(
+            device,
+            queue,
+            &mut bind_entries,
+            &mut image_textures.emission,
+            material.emission.as_ref(),
+            13,
+            geometry::EMISSION_TEX_FALLBACK_COLOR,
+        )?;
         queue.write_buffer(
             &material_params_uniform_buffer,
             0,
             &material_params.as_uniform_buffer_bytes(),
         );
-
+        bind_entries[0] = wgpu::BindGroupEntry {
+            binding: 0,
+            resource: material_params_uniform_buffer.as_entire_binding(),
+        };
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: material_params_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&image_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&image_texture.sampler),
-                },
-            ],
+            entries: &bind_entries,
             label: Some("Texture Bind Group"),
         });
         let result = DrawableTexture {
             params_buffer: material_params_uniform_buffer,
-            image_texture,
             texture_bind_group,
         };
         Ok(result)
+    }
+
+    fn prepare_bind_entries<'a, 'b: 'a>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bind_entries: &'a mut Vec<wgpu::BindGroupEntry<'b>>,
+        image_texture_tmp: &'b mut Option<texture::Texture>,
+        mat_param: Option<&MaterialParam>,
+        bind_num: u32,
+        fallback_color: Vec3,
+    ) -> Result<()> {
+        if let Some(mparam) = mat_param {
+            let image_texture = match mparam {
+                MaterialParam::Texture(path) => texture::Texture::create_texture_data(
+                    device,
+                    queue,
+                    path,
+                    wgpu::AddressMode::Repeat,
+                    wgpu::AddressMode::Repeat,
+                )?,
+                MaterialParam::Color(col) => {
+                    texture::Texture::create_from_color(device, queue, *col)?
+                }
+                MaterialParam::Scalar(s) => {
+                    let col = Vec3::new(*s, *s, *s);
+                    texture::Texture::create_from_color(device, queue, col)?
+                }
+            };
+            *image_texture_tmp = Some(image_texture);
+        } else {
+            let image_texture = texture::Texture::create_from_color(device, queue, fallback_color)?;
+            *image_texture_tmp = Some(image_texture);
+        }
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding: bind_num,
+            resource: wgpu::BindingResource::TextureView(&image_texture_tmp.as_ref().unwrap().view),
+        });
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding: bind_num + 1,
+            resource: wgpu::BindingResource::Sampler(&image_texture_tmp.as_ref().unwrap().sampler),
+        });
+        Ok(())
     }
 }
 
@@ -356,7 +424,7 @@ struct State {
     shader_vert: wgpu::ShaderModule,
     shader_frag: wgpu::ShaderModule,
     pipeline: MeshPipeline,
-    texture_bind_group_layout: BindGroupLayout,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
 
     // camera
     camera: camera::Camera,
@@ -368,7 +436,7 @@ struct State {
 
     // light
     lights_uniform_buffer: wgpu::Buffer,
-    lights_bind_group: BindGroup,
+    lights_bind_group: wgpu::BindGroup,
     light_position: Vec3,
     going_backwards: bool,
 
@@ -417,7 +485,6 @@ impl State {
                     }],
                     label: Some("Camera Bind Group Layout"),
                 });
-
         let camera_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -426,7 +493,6 @@ impl State {
             }],
             label: Some("Camera Bind Group"),
         });
-
         let lights_bind_group_layout =
             init.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -442,7 +508,6 @@ impl State {
                     }],
                     label: Some("Lights Bind Group Layout"),
                 });
-
         let lights_bind_group = init.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &lights_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -451,11 +516,11 @@ impl State {
             }],
             label: Some("Lights Bind Group"),
         });
-
         let texture_bind_group_layout =
             init.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     entries: &[
+                        // material params
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -466,6 +531,7 @@ impl State {
                             },
                             count: None,
                         },
+                        // diffuse1 texture
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -476,8 +542,63 @@ impl State {
                             },
                             count: None,
                         },
+                        // diffuse1 sampler
                         wgpu::BindGroupLayoutEntry {
                             binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        // specular1 texture
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 5,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // specular1 sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 6,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        // normal1 texture
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 9,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // normal1 sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 10,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        // emissive1 texture
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 13,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        // emissive1 sampler
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 14,
                             visibility: wgpu::ShaderStages::FRAGMENT,
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
@@ -485,9 +606,7 @@ impl State {
                     ],
                     label: Some("Texture Bind Group Layout"),
                 });
-
         let (shader_vert, shader_frag) = utils::load_spirv_shader(&init.device, "todo");
-
         let pipeline = MeshPipeline::new(
             &init.device,
             &camera_bind_group_layout,
@@ -497,7 +616,6 @@ impl State {
             &shader_frag,
             &init.config,
         );
-
         let mut smaa_target = smaa::SmaaTarget::new(
             &init.device,
             &init.queue,
@@ -506,7 +624,6 @@ impl State {
             init.config.format,
             smaa::SmaaMode::Smaa1X,
         );
-
         let result = Self {
             init,
             drawable_actors: HashMap::new(),

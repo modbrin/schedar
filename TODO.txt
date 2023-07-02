@@ -12,20 +12,24 @@ v first steps
     v loading full sponza
     V transition to glsl
     v fix glsl data passing bug
-      add lights container
+    v fix shader structs layout mismatch problem
+    v move from cgmath to glam
+      make lights array and enable blending render as many lights as possible
       separate pipeline from mesh
       proper asset encapsulation in pipeline
   add normal mapping
-  make lights array and enable blending render as many lights as possible
   add fps counter
+  add cubemaps support
   enable antialiasing and filtering
     v add smaa
       add taa
       add amd fsr
   implement pbr shader
       find articles to study how to implement it
+      add reflection hdr maps support
   add transparent objects
       add render ordering
+      temporal dithering?
   basic shadows
   asset manager
       use ddx or similar format for textures
@@ -37,17 +41,21 @@ v first steps
   generalized materials
       render graphs?
       how to compose shaders?
-  aabb?
-  transparency and object order
-  dynamic light and multiple lights
+  scene visibility optimizations
+      aabb?
   basic collision and physics
   scene manager
   actors, components and ecs module
   async asset loading
   tetris demo
   debug gui
+      use imgui
   animation
-  procedural animation and physical animation
+      loading fbx format?
+      basic animation playback
+      animation blending
+      animtree ui?
+      procedural animation and physical animation
   in-game gui
   scene editor
   audio engine
@@ -56,6 +64,12 @@ v first steps
   lod
   ssao
   engine architecture planning
+  add engine utilities
+      collision detection
+      speed utils
+      detection if actor is grounded
   threading
   level streaming
   better lighting
+      research voxel cone tracing
+      ssgi + sdfgi + vxgi ?

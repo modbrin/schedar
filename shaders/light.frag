@@ -45,6 +45,7 @@ layout(set = 1, binding = 0) uniform Lights {
     PointLight pointLights[NR_POINT_LIGHTS];
 //    PointLight pointLight;
 //    uint spotCount;
+//    uint directionalEnabled;
     uint directionalEnabled;
     uint pointCount;
 } lights;
@@ -54,16 +55,18 @@ layout(set = 2, binding = 0) uniform MaterialParams {
     float shininess;
 } materialParams;
 
+// diffuse
 layout(set = 2, binding = 1) uniform texture2D texture_diffuse1;
 layout(set = 2, binding = 2) uniform sampler sampler_diffuse1;
-//layout(set = 1, binding = 2) uniform sampler2D texture_diffuse2;
-//layout(set = 1, binding = 3) uniform sampler2D texture_specular1;
-//layout(set = 1, binding = 4) uniform sampler2D texture_specular2;
-//layout(set = 1, binding = 5) uniform sampler2D texture_normal1;
-//layout(set = 1, binding = 6) uniform sampler2D texture_normal2;
-//layout(set = 1, binding = 7) uniform sampler2D texture_height1;
-//layout(set = 1, binding = 8) uniform sampler2D texture_height2;
-//layout(set = 1, binding = 9) uniform sampler2D texture_emissive1;
+// specular
+layout(set = 2, binding = 5) uniform texture2D texture_specular1;
+layout(set = 2, binding = 6) uniform sampler sampler_specular1;
+// normal
+layout(set = 2, binding = 9) uniform texture2D texture_normal1;
+layout(set = 2, binding = 10) uniform sampler sampler_normal1;
+//emissive
+layout(set = 2, binding = 13) uniform texture2D texture_emissive1;
+layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 
 //layout(set = 2, binding = 0) uniform Lights {
 ////    DirectionalLight directionalLight;
@@ -83,7 +86,7 @@ vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
     vec3 diffuseTex = vec3(texture(sampler2D(texture_diffuse1, sampler_diffuse1), ourTexCoord));
     vec3 ambient  = light.ambient * diffuseTex;
     vec3 diffuse  = light.diffuse * diff * diffuseTex;
-    vec3 specular = light.specular * spec;// * vec3(texture(material.texture_specular1, ourTexCoord));
+    vec3 specular = light.specular * spec * vec3(texture(sampler2D(texture_specular1, sampler_specular1), ourTexCoord));
     return ambient + diffuse + specular;
 }
 
@@ -98,12 +101,10 @@ vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
     float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));
 
     vec3 diffuseTex = vec3(texture(sampler2D(texture_diffuse1, sampler_diffuse1), ourTexCoord));
-
     vec3 ambient  = light.ambient * diffuseTex;
     vec3 diffuse  = light.diffuse * diff * diffuseTex;
-    vec3 specular = light.specular * spec;// TODO: * vec3(texture(texture_specular1, ourTexCoord));
-//    return (ambient + diffuse + specular) * attenuation;
-    return (ambient + diffuse + specular);//(diffuse ) * attenuation;
+    vec3 specular = light.specular * spec * vec3(texture(sampler2D(texture_specular1, sampler_specular1), ourTexCoord));
+    return (ambient + diffuse + specular) * attenuation;
 
 }
 
@@ -169,7 +170,9 @@ void main()
     vec3 result = vec3(0);
 
     // phase 1: Directional lighting
-    result += 0.1 * CalcDirLight(lights.directionalLight, norm, viewDir);
+    if (lights.directionalEnabled != 0) {
+        result += 0.1 * CalcDirLight(lights.directionalLight, norm, viewDir);
+    }
     // phase 2: Point lights
     for(int i = 0; i < lights.pointCount; i++) {
         result += 0.7 * CalcPointLight(lights.pointLights[i], norm, ourFragPos, viewDir);

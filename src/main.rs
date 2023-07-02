@@ -12,6 +12,7 @@ mod transforms;
 mod utils;
 
 fn main() {
+    // "../pons-starter/assets/crytek_sponza/sponza.obj"
     let sponza_mesh = CompositeMesh::load_from_file("../Sponza/sponza.obj").unwrap();
     let sponza_actor = Actor::new(sponza_mesh, Transform::new());
 
