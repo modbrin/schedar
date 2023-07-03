@@ -1,10 +1,8 @@
-use crate::primitives::{AsUniformBufferBytes, Transform};
+use crate::primitives::{ShaderTypeDefaultExt, ShaderTypeExt, Transform};
 use crate::{
     camera,
     geometry::{self, CompositeMesh, MaterialParam, StaticMesh, Vertex},
-    texture,
-    transforms::{self, create_transforms},
-    utils,
+    texture, transforms, utils,
 };
 use anyhow::{anyhow, Result};
 use bytemuck::{cast_slice, Pod, Zeroable};
@@ -24,6 +22,7 @@ use winit::{
 
 static WINDOW_TITLE: &str = "Schedar Demo";
 
+const BACKGROUND_CLR_COLOR: Vec4 = Vec4::new(0.2, 0.247, 0.314, 1.0);
 const IS_PERSPECTIVE: bool = true;
 
 pub struct InitWgpu {
@@ -50,18 +49,21 @@ impl InitWgpu {
             })
             .await
             .ok_or_else(|| anyhow!("failed to select appropriate adapter"))?;
-
+        let limits = wgpu::Limits {
+            max_push_constant_size: 128,
+            ..Default::default()
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
-                    features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH,
-                    limits: wgpu::Limits::default(),
+                    features: wgpu::Features::SPIRV_SHADER_PASSTHROUGH
+                        | wgpu::Features::PUSH_CONSTANTS,
+                    limits,
                 },
                 None, // api call tracing
             )
             .await?;
-
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
@@ -69,7 +71,6 @@ impl InitWgpu {
             .filter(|f| f.is_srgb())
             .next()
             .unwrap_or(&surface_caps.formats[0]);
-
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: *surface_format,
@@ -80,7 +81,6 @@ impl InitWgpu {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-
         Ok(Self {
             surface,
             device,
@@ -126,10 +126,29 @@ struct SpotLight {
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct CameraUniform {
-    model: Mat4,
-    mvp: Mat4,
-    normal: Mat4,
+    view_project: Mat4,
     eye_position: Vec3,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct ModelPushConst {
+    model_mat: Mat4,
+    normal_mat: Mat4,
+}
+
+impl ModelPushConst {
+    pub fn from_transform(transform: &Transform) -> Self {
+        let model_mat = transforms::create_transforms(
+            transform.get_position(),
+            transform.get_rotation(),
+            transform.get_scale(),
+        );
+        let normal_mat = model_mat.inverse().transpose();
+        Self {
+            model_mat,
+            normal_mat,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -164,6 +183,7 @@ impl Actor {
 pub struct DrawableActor {
     meshes: Vec<DrawableMesh>,
     textures: Vec<DrawableTexture>,
+    transform: Transform,
 }
 
 pub struct MeshPipeline {
@@ -188,7 +208,10 @@ impl MeshPipeline {
                 &lights_bind_group_layout,
                 &texture_bind_group_layout,
             ],
-            push_constant_ranges: &[],
+            push_constant_ranges: &[wgpu::PushConstantRange {
+                stages: wgpu::ShaderStages::VERTEX,
+                range: 0..ModelPushConst::default_size() as u32,
+            }],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -264,20 +287,22 @@ impl DrawableMesh {
         }
     }
 
-    // // TODO: how to fix?
-    // pub fn render<'a, 'b: 'a>(
-    //     &'b self,
-    //     render_pass: &'a mut wgpu::RenderPass<'a>,
-    //     camera_bind_group: &'a wgpu::BindGroup,
-    //     texture_bind_group: &'a wgpu::BindGroup,
-    // ) {
-    //     render_pass.set_pipeline(&self.pipeline);
-    //     render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-    //     render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-    //     render_pass.set_bind_group(0, camera_bind_group, &[]);
-    //     render_pass.set_bind_group(1, texture_bind_group, &[]);
-    //     render_pass.draw_indexed(0..self.indices_num, 0, 0..1);
-    // }
+    pub fn render<'a, 'b: 'a>(
+        pipeline: &'b wgpu::RenderPipeline,
+        vertex_buffer: &'b wgpu::Buffer,
+        index_buffer: &'b wgpu::Buffer,
+        indices_num: u32,
+        render_pass: &'a mut wgpu::RenderPass<'a>,
+        camera_bind_group: &'a wgpu::BindGroup,
+        texture_bind_group: &'a wgpu::BindGroup,
+    ) {
+        render_pass.set_pipeline(&pipeline);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.set_bind_group(0, camera_bind_group, &[]);
+        render_pass.set_bind_group(1, texture_bind_group, &[]);
+        render_pass.draw_indexed(0..indices_num, 0, 0..1);
+    }
 }
 
 #[derive(Default)]
@@ -303,6 +328,9 @@ impl DrawableTexture {
     ) -> Result<DrawableTexture> {
         let mut bind_entries = Vec::new();
         let mut material_params = MaterialParams { shininess: 76.8 };
+        if let Some(MaterialParam::Scalar(s)) = material.shininess {
+            material_params.shininess = s;
+        }
         let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Material Params Uniform Buffer"),
             size: material_params.size().get(),
@@ -419,7 +447,7 @@ struct State {
     pub init: InitWgpu,
 
     // scene entities
-    drawable_actors: HashMap<Arc<str>, DrawableActor>,
+    drawable_actors: HashMap<String, DrawableActor>,
     // shaders: HashMap<Arc<str>, wgpu::ShaderModule>,
     shader_vert: wgpu::ShaderModule,
     shader_frag: wgpu::ShaderModule,
@@ -457,7 +485,7 @@ impl State {
         // stores model and mvp matrix
         let camera_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Uniform Buffer"),
-            size: CameraUniform::default().size().get(),
+            size: CameraUniform::default_size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -465,7 +493,7 @@ impl State {
         // stores light_position and eye_position
         let lights_uniform_buffer = init.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lights Uniform Buffer"),
-            size: LightsUniform::default().size().get(),
+            size: LightsUniform::default_size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -646,13 +674,8 @@ impl State {
         Ok(result)
     }
 
-    pub fn spawn_actor(
-        &mut self,
-        name: Arc<str>,
-        actor: &Actor,
-        shader_name: Arc<str>,
-    ) -> Result<()> {
-        if self.drawable_actors.contains_key(&name) {
+    pub fn spawn_actor(&mut self, name: &str, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
+        if self.drawable_actors.contains_key(name) {
             return Err(anyhow!("asset with given name already spawned"));
         }
         let mut meshes = Vec::new();
@@ -674,8 +697,12 @@ impl State {
             )?;
             textures.push(tex)
         }
-        let actor = DrawableActor { meshes, textures };
-        self.drawable_actors.insert(name, actor);
+        let actor = DrawableActor {
+            meshes,
+            textures,
+            transform: actor.transform.clone(),
+        };
+        self.drawable_actors.insert(name.to_string(), actor);
         Ok(())
     }
 
@@ -737,18 +764,10 @@ impl State {
             self.light_position.x += dt * 50.0;
         }
 
-        // update camera uniform
-        let model_mat = transforms::create_transforms(
-            [0.0, 0.0, 0.0].into(),
-            [0.0, 0.0, 0.0].into(),
-            [0.1, 0.1, 0.1].into(),
-        );
+        // update camera
         self.camera_controller.update_camera(&mut self.camera, dt);
-        let normal_mat = model_mat.inverse().transpose();
         let camera_uniform = CameraUniform {
-            model: model_mat,
-            mvp: self.projection * self.camera.view_mat() * model_mat,
-            normal: normal_mat,
+            view_project: self.projection * self.camera.view_mat(),
             eye_position: self.camera.position,
         };
         self.init.queue.write_buffer(
@@ -825,6 +844,7 @@ impl State {
                 });
 
         {
+            let background_color = BACKGROUND_CLR_COLOR;
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -832,10 +852,10 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.2,
-                            g: 0.247,
-                            b: 0.314,
-                            a: 1.0,
+                            r: background_color.x as f64,
+                            g: background_color.y as f64,
+                            b: background_color.z as f64,
+                            a: background_color.w as f64,
                         }),
                         store: true,
                     },
@@ -853,7 +873,10 @@ impl State {
             render_pass.set_pipeline(&self.pipeline.pipeline);
 
             for (_, actor) in self.drawable_actors.iter() {
+                let model_push_const = ModelPushConst::from_transform(&actor.transform);
+                let pc_data = model_push_const.as_uniform_buffer_bytes();
                 for mesh in actor.meshes.iter() {
+                    render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pc_data);
                     render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     render_pass
                         .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -878,15 +901,15 @@ impl State {
     }
 }
 
-pub fn run(actors: &[(Arc<str>, &Actor)]) -> Result<()> {
+pub fn run(actors: &[(&str, &Actor)]) -> Result<()> {
     env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop)?;
     window.set_title(WINDOW_TITLE);
     let mut state = pollster::block_on(State::new(&window))?;
 
-    for (name, actor) in actors {
-        state.spawn_actor(name.clone(), actor, "todo".into())?;
+    for (name, actor) in actors.into_iter() {
+        state.spawn_actor(name, actor, "todo".into())?;
     }
 
     let mut render_start_time = std::time::Instant::now();

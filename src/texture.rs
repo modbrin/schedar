@@ -82,7 +82,7 @@ impl Texture {
         v_mode: wgpu::AddressMode,
     ) -> Result<Self> {
         let path = img_file.as_ref();
-        let img = ImageReader::open(path)?.decode()?.flipv();
+        let img = ImageReader::open(path)?.decode()?; //.flipv();
         let rgba = img.to_rgba8();
         let dimensions = img.dimensions();
 

@@ -6,9 +6,7 @@ layout (location = 2) in vec2 aTexCoord;
 //layout (location = 4) in vec3 aBitangent;
 
 layout (set = 0, binding = 0) uniform Uniforms {
-    mat4 model;
-    mat4 mvp;
-    mat4 normal;
+    mat4 viewProject;
     vec3 viewPos;
 } uniforms;
 
@@ -17,11 +15,16 @@ layout (location = 1) out vec3 ourFragPos;
 layout (location = 2) out vec3 ourNormal;
 layout (location = 3) out vec2 ourTexCoord;
 
+layout (push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 normal;
+} pConsts;
+
 void main()
 {
-    gl_Position = uniforms.mvp * vec4(aPos, 1.0);
+    gl_Position = uniforms.viewProject * pConsts.model * vec4(aPos, 1.0);
     ourTexCoord = vec2(aTexCoord.s, aTexCoord.t);
-    ourFragPos = vec3(uniforms.model * vec4(aPos, 1.0));
-    ourNormal = vec3(uniforms.normal * vec4(aNormal, 0.0)); // TODO: supply proper 3x3 normal matrix
+    ourFragPos = vec3(pConsts.model * vec4(aPos, 1.0));
+    ourNormal = vec3(pConsts.normal * vec4(aNormal, 0.0)); // TODO: supply proper 3x3 normal matrix
     ourViewPos = uniforms.viewPos;
 }

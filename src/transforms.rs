@@ -17,7 +17,7 @@ pub fn create_projection(aspect: f32, is_perspective: bool) -> Mat4 {
             OPENGL_TO_WGPU_MATRIX * Mat4::perspective_rh(60.0f32.to_radians(), aspect, 0.1, 500.0);
     } else {
         project_mat =
-            OPENGL_TO_WGPU_MATRIX * Mat4::orthographic_rh(-4.0, 4.0, -3.0, 3.0, -1.0, 6.0);
+            OPENGL_TO_WGPU_MATRIX * Mat4::orthographic_rh(-4.0, 4.0, -3.0, 3.0, -1.0, 60.0);
     }
     project_mat
 }
