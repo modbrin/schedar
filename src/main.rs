@@ -1,9 +1,9 @@
-use crate::common::Actor;
+use crate::render::Actor;
 use crate::primitives::Transform;
 use geometry::CompositeMesh;
 
 mod camera;
-mod common;
+mod render;
 mod error;
 mod geometry;
 mod primitives;
@@ -28,5 +28,5 @@ fn main() {
             .set_scale(2.0, 2.0, 2.0),
     );
 
-    common::run(&[("sponza", &sponza_actor), ("backpack", &backpack_actor)]).unwrap();
+    render::run(&[("sponza", &sponza_actor), ("backpack", &backpack_actor)]).unwrap();
 }
