@@ -1,5 +1,7 @@
 use anyhow::*;
+use glam::*;
 use num::{clamp, Num};
+use rand::Rng;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::ops::{BitAnd, Not};
@@ -38,6 +40,47 @@ pub fn round_to_next_multiple<T: Num + Copy>(number: T, multiple: T) -> T {
 /// Maps color scalar from 0.0..1.0 to 0..255 range
 pub fn color_f32_to_u8(val: f32) -> u8 {
     (256.0 * clamp(val, 0.0, 1.0)) as u8
+}
+
+pub fn make_common_bgl_entry_uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+pub fn make_common_bgl_entry_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            multisampled: false,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        },
+        count: None,
+    }
+}
+
+pub fn make_common_bgl_entry_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+pub fn random_color() -> Vec3 {
+    let mut rng = rand::thread_rng();
+    let mut gen = || rng.gen_range(0.0f32..1.0);
+    Vec3::new(gen(), gen(), gen())
 }
 
 #[cfg(test)]

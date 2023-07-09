@@ -1,34 +1,21 @@
 use std::process::{Command, ExitStatus};
 
-static TO_COMPILE: &[&str] = &["light"];
-
 fn main() {
-    for name in TO_COMPILE {
-        compile_to_spirv(name);
-    }
+    compile_to_spirv("light", "vert");
+    compile_to_spirv("light", "frag");
+    compile_to_spirv("light_split_base", "frag");
+    compile_to_spirv("light_split_add", "frag");
 }
 
-fn compile_to_spirv(name: &str) {
-    let vert_src = format!("shaders/{}.vert", name);
-    let frag_src = format!("shaders/{}.frag", name);
-    let vert_out = format!("shaders/out/{}_vert.spv", name);
-    let frag_out = format!("shaders/out/{}_frag.spv", name);
-    // glslc shaders/light.vert -o shaders/out/light_vert.spv
-    // glslc shaders/light.frag -o shaders/out/light_frag.spv
+fn compile_to_spirv(name: &str, ext: &str) {
+    let src_path = format!("shaders/{name}.{ext}");
+    let out_path = format!("shaders/out/{name}_{ext}.spv");
     let out = Command::new("glslc")
-        .args([vert_src.as_str(), "-o", vert_out.as_str()])
+        .args([src_path.as_str(), "-o", out_path.as_str()])
         .output()
-        .expect(&format!("failed to compile vertex shader: {}", name));
+        .expect(&format!("failed to compile shader: {name}.{ext}"));
     if !out.status.success() {
         panic!("{}", String::from_utf8(out.stderr).unwrap());
     }
-    let out = Command::new("glslc")
-        .args([frag_src.as_str(), "-o", frag_out.as_str()])
-        .output()
-        .expect(&format!("failed to compile fragment shader: {}", name));
-    if !out.status.success() {
-        panic!("{}", String::from_utf8(out.stderr).unwrap());
-    }
-    println!("cargo:rerun-if-changed={}", vert_src);
-    println!("cargo:rerun-if-changed={}", frag_src);
+    println!("cargo:rerun-if-changed={}", src_path);
 }

@@ -28,7 +28,7 @@ impl Texture {
             depth_or_array_layers: 1,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Color Image Texture"),
+            label: Some("Color Texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,

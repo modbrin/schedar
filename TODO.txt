@@ -14,12 +14,19 @@ v first steps
     v fix glsl data passing bug
     v fix shader structs layout mismatch problem
     v move from cgmath to glam
-      make lights array and enable blending render as many lights as possible
-      separate pipeline from mesh
-      proper asset encapsulation in pipeline
+    v make lights array and enable blending render as many lights as possible
+      separate pipeline from mesh (more code restructuring)
+      split state creation into smaller functions
+  shader improvement
+      use blinn-phong in shader
+      add shadow mapping
+      add normal mapping
+      add cubemaps support
+      sprite rendering (debug scene icons)
   add normal mapping
   add fps counter
-  add cubemaps support
+  change api facing coordinates to use Z as up
+  try to replace all samplers with only one
   enable antialiasing and filtering
     v add smaa
       add taa
@@ -31,23 +38,31 @@ v first steps
       add render ordering
       temporal dithering?
   basic shadows
+  move rendering logic to separate module
+  project logo
   asset manager
       use ddx or similar format for textures
       import assets => convert objects and images into internal format (gltf?)
   editor features
+      line tracing in scene, collision detection maybe needed?
+      mouse cursor tracing
       select object
       draw handle arrow
       draw objects
   generalized materials
-      render graphs?
-      how to compose shaders?
+      render graphs
+      how to compose shaders, read shader permutation articles
   scene visibility optimizations
       aabb?
+      regional scene loading
+      level streaming
   basic collision and physics
   scene manager
   actors, components and ecs module
   async asset loading
   tetris demo
+  add decals
+  add post-processing step
   debug gui
       use imgui
   animation
