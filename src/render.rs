@@ -287,22 +287,23 @@ impl DrawableMesh {
         }
     }
 
-    pub fn render<'a, 'b: 'a>(
-        pipeline: &'b wgpu::RenderPipeline,
-        vertex_buffer: &'b wgpu::Buffer,
-        index_buffer: &'b wgpu::Buffer,
-        indices_num: u32,
-        render_pass: &'a mut wgpu::RenderPass<'a>,
-        camera_bind_group: &'a wgpu::BindGroup,
-        texture_bind_group: &'a wgpu::BindGroup,
-    ) {
-        render_pass.set_pipeline(&pipeline);
-        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.set_bind_group(0, camera_bind_group, &[]);
-        render_pass.set_bind_group(1, texture_bind_group, &[]);
-        render_pass.draw_indexed(0..indices_num, 0, 0..1);
-    }
+    // TODO: how to use this?
+    // pub fn render<'a, 'b: 'a>(
+    //     pipeline: &'b wgpu::RenderPipeline,
+    //     vertex_buffer: &'b wgpu::Buffer,
+    //     index_buffer: &'b wgpu::Buffer,
+    //     indices_num: u32,
+    //     render_pass: &'a mut wgpu::RenderPass<'a>,
+    //     camera_bind_group: &'a wgpu::BindGroup,
+    //     texture_bind_group: &'a wgpu::BindGroup,
+    // ) {
+    //     render_pass.set_pipeline(&pipeline);
+    //     render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    //     render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    //     render_pass.set_bind_group(0, camera_bind_group, &[]);
+    //     render_pass.set_bind_group(1, texture_bind_group, &[]);
+    //     render_pass.draw_indexed(0..indices_num, 0, 0..1);
+    // }
 }
 
 #[derive(Default)]
@@ -329,7 +330,7 @@ impl DrawableTexture {
         let mut bind_entries = Vec::new();
         let mut material_params = MaterialParams { shininess: 76.8 };
         if let Some(MaterialParam::Scalar(s)) = material.shininess {
-            material_params.shininess = s;
+            material_params.shininess = s; // TODO: use texture
         }
         let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Material Params Uniform Buffer"),
@@ -449,8 +450,6 @@ struct State {
     // scene entities
     drawable_actors: HashMap<String, DrawableActor>,
     // shaders: HashMap<Arc<str>, wgpu::ShaderModule>,
-    shader_vert: wgpu::ShaderModule,
-    shader_frag: wgpu::ShaderModule,
     pipeline: MeshPipeline,
     texture_bind_group_layout: wgpu::BindGroupLayout,
 
@@ -634,7 +633,16 @@ impl State {
                     ],
                     label: Some("Texture Bind Group Layout"),
                 });
-        let (shader_vert, shader_frag) = utils::load_spirv_shader(&init.device, "todo");
+        let shader_vert = utils::load_spirv_shader_module(
+            &init.device,
+            "base_vert",
+            "./shaders/out/light_vert.spv",
+        )?;
+        let shader_frag = utils::load_spirv_shader_module(
+            &init.device,
+            "base_frag",
+            "./shaders/out/light_frag.spv",
+        )?;
         let pipeline = MeshPipeline::new(
             &init.device,
             &camera_bind_group_layout,
@@ -655,8 +663,6 @@ impl State {
         let result = Self {
             init,
             drawable_actors: HashMap::new(),
-            shader_vert,
-            shader_frag,
             pipeline,
             texture_bind_group_layout,
             camera,

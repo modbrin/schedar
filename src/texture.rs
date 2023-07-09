@@ -8,6 +8,7 @@ use image::GenericImageView;
 use num::clamp;
 
 use crate::error::EngineError;
+use crate::utils::color_f32_to_u8;
 
 pub struct Texture {
     pub texture: wgpu::Texture,
@@ -36,12 +37,11 @@ impl Texture {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let f32_to_u8 = |input: f32| -> u8 { (256.0 * clamp(input, 0.0, 1.0)) as u8 };
         let rgba = [
-            f32_to_u8(color.x),
-            f32_to_u8(color.y),
-            f32_to_u8(color.z),
-            f32_to_u8(1.0),
+            color_f32_to_u8(color.x),
+            color_f32_to_u8(color.y),
+            color_f32_to_u8(color.z),
+            color_f32_to_u8(1.0),
         ];
         queue.write_texture(
             wgpu::ImageCopyTexture {

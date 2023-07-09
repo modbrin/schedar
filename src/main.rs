@@ -1,12 +1,12 @@
-use crate::render::Actor;
 use crate::primitives::Transform;
+use crate::render::Actor;
 use geometry::CompositeMesh;
 
 mod camera;
-mod render;
 mod error;
 mod geometry;
 mod primitives;
+mod render;
 mod texture;
 mod transforms;
 mod utils;
