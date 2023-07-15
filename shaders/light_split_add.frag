@@ -6,8 +6,8 @@ layout (location = 1) in vec3 ourFragPos;
 layout (location = 2) in vec3 ourNormal;
 layout (location = 3) in vec2 ourTexCoord;
 
-#define NR_POINT_LIGHTS 4
-#define NR_SPOT_LIGHTS 4
+#define NR_POINT_LIGHTS 16
+#define NR_SPOT_LIGHTS 16
 
 struct SpotLight {
     vec3 position;
@@ -32,12 +32,15 @@ struct PointLight {
     float quadratic;
 };
 
-layout(set = 1, binding = 0) uniform Lights {
-//    SpotLight spotLights[NR_SPOT_LIGHTS];
+layout(set = 1, binding = 0) uniform LightsUniform {
     PointLight pointLights[NR_POINT_LIGHTS];
-//    uint spotCount;
     uint pointCount;
 } lights;
+
+//layout(set = 1, binding = 1) uniform SpotLightsUniform {
+//    SpotLight spotLights[NR_SPOT_LIGHTS];
+//    uint spotCount;
+//} spotLights;
 
 
 layout(set = 2, binding = 0) uniform MaterialParams {

@@ -1,3 +1,21 @@
+use std::collections::HashMap;
+use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::{cmp, iter};
+
+use anyhow::{anyhow, Result};
+use bytemuck::cast_slice;
+use encase::ShaderType;
+use glam::*;
+use num::clamp;
+use wgpu::util::DeviceExt;
+use wgpu::{BlendFactor, BlendOperation};
+use winit::{
+    event::*,
+    event_loop::{ControlFlow, EventLoop},
+    window::{Window, WindowBuilder},
+};
+
 use crate::primitives::{ShaderTypeDefaultExt, ShaderTypeExt, Transform};
 use crate::utils::*;
 use crate::{
@@ -5,33 +23,21 @@ use crate::{
     geometry::{self, CompositeMesh, MaterialParam, StaticMesh, Vertex},
     texture, transforms, utils,
 };
-use anyhow::{anyhow, Result};
-use bytemuck::{cast_slice, Pod, Zeroable};
-use encase::{ShaderType, UniformBuffer};
-use glam::*;
-use num::clamp;
-use std::collections::{HashMap, VecDeque};
-use std::num::NonZeroU64;
-use std::path::Path;
-use std::sync::Arc;
-use std::{cmp, iter, path::PathBuf};
-use wgpu::util::DeviceExt;
-use wgpu::{BindingResource, BlendFactor, BlendOperation, DynamicOffset};
-use winit::{
-    event::*,
-    event_loop::{ControlFlow, EventLoop},
-    window::{Window, WindowBuilder},
-};
 
 static WINDOW_TITLE: &str = "Schedar Demo";
 
 const BACKGROUND_CLR_COLOR: Vec4 = Vec4::new(0.2, 0.247, 0.314, 1.0);
 const IS_PERSPECTIVE: bool = true;
 
-const SPOT_LIGHTS_PER_PASS: usize = 4;
+// Spot lights count
+const SPOT_LIGHTS_PER_PASS: usize = 16;
+const MAX_SPOT_LIGHTS_PER_SCENE: usize = 500;
+const SPOT_LIGHT_UNIFORMS_PER_SCENE: usize = MAX_SPOT_LIGHTS_PER_SCENE / SPOT_LIGHTS_PER_PASS;
+const SPOT_LIGHTS_PER_SCENE: usize = SPOT_LIGHT_UNIFORMS_PER_SCENE * SPOT_LIGHTS_PER_PASS;
 
-const POINT_LIGHTS_PER_PASS: usize = 4;
-const MAX_POINT_LIGHTS_PER_SCENE: usize = 500;
+// Point lights count
+const POINT_LIGHTS_PER_PASS: usize = 16;
+const MAX_POINT_LIGHTS_PER_SCENE: usize = 1000;
 const POINT_LIGHT_UNIFORMS_PER_SCENE: usize = MAX_POINT_LIGHTS_PER_SCENE / POINT_LIGHTS_PER_PASS;
 const POINT_LIGHTS_PER_SCENE: usize = POINT_LIGHT_UNIFORMS_PER_SCENE * POINT_LIGHTS_PER_PASS;
 
@@ -516,147 +522,123 @@ impl DrawableTexture {
 }
 
 struct State {
-    pub ctx: WgpuContext,
+    ctx: WgpuContext,
+    scene_state: SceneState,
+    render_state: RenderState,
+    camera_state: CameraState,
+    lights_state: LightsState,
+}
 
-    // scene entities
+struct SceneState {
     drawable_actors: HashMap<String, DrawableActor>,
+}
+
+struct RenderState {
     pipeline_base: DrawPipeline,
     pipeline_additive: DrawPipeline,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    smaa_target: smaa::SmaaTarget,
+}
 
-    // camera
+struct CameraState {
     camera: camera::Camera,
     projection: Mat4,
     camera_controller: camera::CameraController,
     camera_uniform_buffer: wgpu::Buffer,
+    camera_bind_group_layout: wgpu::BindGroupLayout,
     camera_bind_group: wgpu::BindGroup,
     mouse_pressed: bool,
+}
 
-    // light
+struct LightsState {
     directional_light: DirectionalLight,
     point_lights: Vec<PointLight>,
     spot_lights: Vec<SpotLight>,
     lights_base_uniform_buffer: wgpu::Buffer,
+    lights_base_bind_group_layout: wgpu::BindGroupLayout,
     lights_base_bind_group: wgpu::BindGroup,
     // lights_add_uniform_buffer: wgpu::Buffer,
     // lights_add_bind_group: wgpu::BindGroup,
-    lights_ring_buffer: wgpu::Buffer,
-    lights_ring_buffer_bind_group: wgpu::BindGroup,
-    lights_ring_buffer_elem_size: u64,
-
-    // smaa
-    smaa_target: smaa::SmaaTarget,
+    lights_update_buffer: wgpu::Buffer,
+    lights_update_buffer_bind_group_layout: wgpu::BindGroupLayout,
+    lights_update_buffer_bind_group: wgpu::BindGroup,
+    lights_update_buffer_elem_size: u64,
 }
 
 impl State {
     async fn new(window: &Window) -> Result<Self> {
         let ctx = WgpuContext::init_wgpu(window).await?;
+        let scene_state = Self::init_scene_state();
+        let camera_state = Self::init_camera_state(&ctx);
+        let lights_state = Self::init_lights_state(&ctx);
+        let render_state = Self::init_render_state(&ctx, window, &camera_state, &lights_state)?;
 
-        let camera =
-            camera::Camera::new((0.0, 10.0, 0.0), -20.0f32.to_radians(), 0.0f32.to_radians());
-        let camera_controller = camera::CameraController::new(0.3, 30.0);
-        let aspect = ctx.config.width as f32 / ctx.config.height as f32;
-        let projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
+        let state = Self {
+            ctx,
+            scene_state,
+            camera_state,
+            render_state,
+            lights_state,
+        };
+        Ok(state)
+    }
 
-        // stores model and mvp matrix
-        let camera_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Camera Uniform Buffer"),
-            size: CameraUniform::default_size(),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let camera_bind_group_layout =
-            ctx.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                    label: Some("Camera Bind Group Layout"),
-                });
-        let camera_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_uniform_buffer.as_entire_binding(),
-            }],
-            label: Some("Camera Bind Group"),
-        });
+    pub fn spawn_actor(&mut self, name: &str, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
+        if self.scene_state.drawable_actors.contains_key(name) {
+            return Err(anyhow!("asset with given name already spawned"));
+        }
+        let mut meshes = Vec::new();
+        let mut textures = Vec::new();
+        for (static_mesh, mat_id) in actor.static_mesh.components.iter() {
+            if let Some(mat_id) = *mat_id {
+                let mesh = DrawableMesh::new(&self.ctx.device, static_mesh, mat_id);
+                meshes.push(mesh);
+            } else {
+                println!("encountered mesh without referenced texture");
+            }
+        }
+        for mat in actor.static_mesh.materials.iter() {
+            let tex = DrawableTexture::new(
+                &self.ctx.device,
+                &self.ctx.queue,
+                &self.render_state.texture_bind_group_layout,
+                mat,
+            )?;
+            textures.push(tex)
+        }
+        let actor = DrawableActor {
+            meshes,
+            textures,
+            transform: actor.transform.clone(),
+        };
+        self.scene_state
+            .drawable_actors
+            .insert(name.to_string(), actor);
+        Ok(())
+    }
 
-        let lights_base_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Lights Uniform Buffer"),
-            size: SplitLightsBaseUniform::default_size(),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_base_bind_group_layout =
-            ctx.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                    label: Some("Lights Bind Group Layout"),
-                });
-        let lights_base_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &lights_base_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: lights_base_uniform_buffer.as_entire_binding(),
-            }],
-            label: Some("Lights Base Bind Group"),
-        });
-        let lights_ring_buffer_elem_size = round_to_next_multiple(
-            SplitLightsAddUniform::default_size(),
-            ctx.device.limits().min_uniform_buffer_offset_alignment as u64,
-        );
-        let lights_ring_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Lights Ring Buffer"),
-            size: lights_ring_buffer_elem_size * POINT_LIGHT_UNIFORMS_PER_SCENE as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let lights_ring_buffer_bind_group_layout = ctx.device.create_bind_group_layout(
-            &wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(SplitLightsAddUniform::default_size()),
-                    },
-                    count: None,
-                }],
-                label: Some("Lights Ring Buffer Bind Group Layout"),
-            },
-        );
-        let lights_ring_buffer_bind_group =
-            ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &lights_ring_buffer_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &lights_ring_buffer,
-                        offset: 0,
-                        size: NonZeroU64::new(SplitLightsAddUniform::default_size()),
-                    }),
-                }],
-                label: Some("Lights Ring Buffer Bind Group"),
-            });
+    pub fn add_point_light(&mut self, position: Vec3, color: Vec3) {
+        let light = PointLight {
+            position,
+            ambient: color,
+            diffuse: color,
+            ..Default::default()
+        };
+        self.lights_state.point_lights.push(light);
+    }
 
+    pub fn init_scene_state() -> SceneState {
+        SceneState {
+            drawable_actors: HashMap::new(),
+        }
+    }
+
+    pub fn init_render_state(
+        ctx: &WgpuContext,
+        window: &Window,
+        camera_state: &CameraState,
+        lights_state: &LightsState,
+    ) -> Result<RenderState> {
         let texture_bind_group_layout =
             ctx.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -699,8 +681,8 @@ impl State {
         )?;
         let pipeline_base = DrawPipeline::new(
             &ctx.device,
-            &camera_bind_group_layout,
-            &lights_base_bind_group_layout,
+            &camera_state.camera_bind_group_layout,
+            &lights_state.lights_base_bind_group_layout,
             &texture_bind_group_layout,
             &shader_vert,
             &shader_base_frag,
@@ -709,93 +691,169 @@ impl State {
         );
         let pipeline_additive = DrawPipeline::new(
             &ctx.device,
-            &camera_bind_group_layout,
-            &lights_ring_buffer_bind_group_layout,
+            &camera_state.camera_bind_group_layout,
+            &lights_state.lights_update_buffer_bind_group_layout,
             &texture_bind_group_layout,
             &shader_vert,
             &shader_add_frag,
             &ctx.config,
             true,
         );
-        let mut smaa_target = smaa::SmaaTarget::new(
+        let smaa_target = Self::init_smma_target(&ctx, window);
+        let state = RenderState {
+            pipeline_base,
+            pipeline_additive,
+            texture_bind_group_layout,
+            smaa_target,
+        };
+        Ok(state)
+    }
+
+    pub fn init_smma_target(ctx: &WgpuContext, window: &Window) -> smaa::SmaaTarget {
+        smaa::SmaaTarget::new(
             &ctx.device,
             &ctx.queue,
             window.inner_size().width,
             window.inner_size().height,
             ctx.config.format,
             smaa::SmaaMode::Smaa1X,
-        );
-        let result = Self {
-            ctx: ctx,
-            drawable_actors: HashMap::new(),
-            pipeline_base,
-            pipeline_additive,
-            texture_bind_group_layout,
+        )
+    }
+
+    pub fn init_camera_state(ctx: &WgpuContext) -> CameraState {
+        let camera =
+            camera::Camera::new((0.0, 10.0, 0.0), -20.0f32.to_radians(), 0.0f32.to_radians());
+        let camera_controller = camera::CameraController::new(0.3, 30.0);
+        let aspect = ctx.config.width as f32 / ctx.config.height as f32;
+        let projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
+
+        // stores model and mvp matrix
+        let camera_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera Uniform Buffer"),
+            size: CameraUniform::default_size(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let camera_bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("Camera Bind Group Layout"),
+                });
+        let camera_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("Camera Bind Group"),
+        });
+        CameraState {
             camera,
             projection,
             camera_controller,
-            camera_bind_group,
             camera_uniform_buffer,
+            camera_bind_group_layout,
+            camera_bind_group,
+            mouse_pressed: false,
+        }
+    }
+
+    pub fn init_lights_state(ctx: &WgpuContext) -> LightsState {
+        let lights_base_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lights Uniform Buffer"),
+            size: SplitLightsBaseUniform::default_size(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights_base_bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("Lights Bind Group Layout"),
+                });
+        let lights_base_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &lights_base_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: lights_base_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("Lights Base Bind Group"),
+        });
+        let lights_update_buffer_elem_size = round_to_next_multiple(
+            SplitLightsAddUniform::default_size(),
+            ctx.device.limits().min_uniform_buffer_offset_alignment as u64,
+        );
+        let lights_update_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lights Update Buffer"),
+            size: lights_update_buffer_elem_size * POINT_LIGHT_UNIFORMS_PER_SCENE as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights_update_buffer_bind_group_layout = ctx.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(SplitLightsAddUniform::default_size()),
+                    },
+                    count: None,
+                }],
+                label: Some("Lights Update Buffer Bind Group Layout"),
+            },
+        );
+        let lights_update_buffer_bind_group =
+            ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &lights_update_buffer_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &lights_update_buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(SplitLightsAddUniform::default_size()),
+                    }),
+                }],
+                label: Some("Lights Ring Buffer Bind Group"),
+            });
+        LightsState {
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
             spot_lights: Vec::new(),
             lights_base_uniform_buffer,
+            lights_base_bind_group_layout,
             lights_base_bind_group,
-            lights_ring_buffer,
-            lights_ring_buffer_bind_group,
-            lights_ring_buffer_elem_size,
-            smaa_target,
-            mouse_pressed: false,
-        };
-        Ok(result)
-    }
-
-    pub fn spawn_actor(&mut self, name: &str, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
-        if self.drawable_actors.contains_key(name) {
-            return Err(anyhow!("asset with given name already spawned"));
+            lights_update_buffer,
+            lights_update_buffer_bind_group_layout,
+            lights_update_buffer_bind_group,
+            lights_update_buffer_elem_size,
         }
-        let mut meshes = Vec::new();
-        let mut textures = Vec::new();
-        for (static_mesh, mat_id) in actor.static_mesh.components.iter() {
-            if let Some(mat_id) = *mat_id {
-                let mesh = DrawableMesh::new(&self.ctx.device, static_mesh, mat_id);
-                meshes.push(mesh);
-            } else {
-                println!("encountered mesh without referenced texture");
-            }
-        }
-        for mat in actor.static_mesh.materials.iter() {
-            let tex = DrawableTexture::new(
-                &self.ctx.device,
-                &self.ctx.queue,
-                &self.texture_bind_group_layout,
-                mat,
-            )?;
-            textures.push(tex)
-        }
-        let actor = DrawableActor {
-            meshes,
-            textures,
-            transform: actor.transform.clone(),
-        };
-        self.drawable_actors.insert(name.to_string(), actor);
-        Ok(())
-    }
-
-    pub fn add_point_light(&mut self, position: Vec3, color: Vec3) {
-        let light = PointLight {
-            position,
-            ambient: color,
-            diffuse: color,
-            ..Default::default()
-        };
-        self.point_lights.push(light);
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             let aspect = new_size.width as f32 / new_size.height as f32;
-            self.projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
+            self.camera_state.projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
 
             self.ctx.size = new_size;
             self.ctx.config.width = new_size.width;
@@ -803,7 +861,8 @@ impl State {
             self.ctx
                 .surface
                 .configure(&self.ctx.device, &self.ctx.config);
-            self.smaa_target
+            self.render_state
+                .smaa_target
                 .resize(&self.ctx.device, new_size.width, new_size.height);
         }
     }
@@ -815,12 +874,14 @@ impl State {
                 button: 3, // Right Mouse Button
                 state,
             } => {
-                self.mouse_pressed = *state == ElementState::Pressed;
+                self.camera_state.mouse_pressed = *state == ElementState::Pressed;
                 true
             }
             DeviceEvent::MouseMotion { delta } => {
-                if self.mouse_pressed {
-                    self.camera_controller.mouse_move(delta.0, delta.1);
+                if self.camera_state.mouse_pressed {
+                    self.camera_state
+                        .camera_controller
+                        .mouse_move(delta.0, delta.1);
                 }
                 true
             }
@@ -829,40 +890,27 @@ impl State {
     }
 
     fn update(&mut self, dt: f32) {
-        // // update light
-        // if self.light_position.x > 120.0 {
-        //     // self.light_position.x = -150.0;
-        //     self.going_backwards = true;
-        // }
-        // if self.light_position.x < -120.0 {
-        //     // self.light_position.x = -150.0;
-        //     self.going_backwards = false;
-        // }
-        // if self.going_backwards {
-        //     self.light_position.x -= dt * 50.0;
-        // } else {
-        //     self.light_position.x += dt * 50.0;
-        // }
-
         // update camera
-        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera_state
+            .camera_controller
+            .update_camera(&mut self.camera_state.camera, dt);
         let camera_uniform = CameraUniform {
-            view_project: self.projection * self.camera.view_mat(),
-            eye_position: self.camera.position,
+            view_project: self.camera_state.projection * self.camera_state.camera.view_mat(),
+            eye_position: self.camera_state.camera.position,
         };
         self.ctx.queue.write_buffer(
-            &self.camera_uniform_buffer,
+            &self.camera_state.camera_uniform_buffer,
             0,
             &camera_uniform.as_uniform_buffer_bytes(),
         );
 
         // update lights uniform
         let light_base_data = SplitLightsBaseUniform {
-            directional_light: self.directional_light.clone(),
+            directional_light: self.lights_state.directional_light.clone(),
             directional_enabled: 1,
         };
         self.ctx.queue.write_buffer(
-            &self.lights_base_uniform_buffer,
+            &self.lights_state.lights_base_uniform_buffer,
             0,
             &light_base_data.as_uniform_buffer_bytes(),
         )
@@ -873,9 +921,10 @@ impl State {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let smaa_frame = self
-            .smaa_target
-            .start_frame(&self.ctx.device, &self.ctx.queue, &view);
+        let smaa_frame =
+            self.render_state
+                .smaa_target
+                .start_frame(&self.ctx.device, &self.ctx.queue, &view);
         let depth_texture = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
                 width: self.ctx.config.width,
@@ -924,14 +973,14 @@ impl State {
                 }),
             });
 
-            render_pass.set_pipeline(&self.pipeline_base.pipeline);
+            render_pass.set_pipeline(&self.render_state.pipeline_base.pipeline);
 
-            for (_, actor) in self.drawable_actors.iter() {
+            for (_, actor) in self.scene_state.drawable_actors.iter() {
                 let model_push_const = ModelPushConst::from_transform(&actor.transform);
                 let pconst_data = model_push_const.as_uniform_buffer_bytes();
                 render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pconst_data);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_bind_group(1, &self.lights_base_bind_group, &[]);
+                render_pass.set_bind_group(0, &self.camera_state.camera_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.lights_state.lights_base_bind_group, &[]);
                 for mesh in actor.meshes.iter() {
                     render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     render_pass
@@ -945,8 +994,8 @@ impl State {
                 }
             }
         }
-        let mut ring_idx = 0u64;
-        for lights_chunk in self.point_lights.chunks(POINT_LIGHTS_PER_PASS) {
+        let mut lights_buf_idx = 0u64;
+        for lights_chunk in self.lights_state.point_lights.chunks(POINT_LIGHTS_PER_PASS) {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Additive Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -966,22 +1015,26 @@ impl State {
                     stencil_ops: None,
                 }),
             });
-            render_pass.set_pipeline(&self.pipeline_additive.pipeline);
+            render_pass.set_pipeline(&self.render_state.pipeline_additive.pipeline);
 
             let light_add_data = SplitLightsAddUniform::from_slice(lights_chunk);
             self.ctx.queue.write_buffer(
-                &self.lights_ring_buffer,
-                ring_idx,
+                &self.lights_state.lights_update_buffer,
+                lights_buf_idx,
                 &light_add_data.as_uniform_buffer_bytes(),
             );
-            render_pass.set_bind_group(1, &self.lights_ring_buffer_bind_group, &[ring_idx as u32]);
-            ring_idx += self.lights_ring_buffer_elem_size;
+            render_pass.set_bind_group(
+                1,
+                &self.lights_state.lights_update_buffer_bind_group,
+                &[lights_buf_idx as u32],
+            );
+            lights_buf_idx += self.lights_state.lights_update_buffer_elem_size;
 
-            for (_, actor) in self.drawable_actors.iter() {
+            for (_, actor) in self.scene_state.drawable_actors.iter() {
                 let model_push_const = ModelPushConst::from_transform(&actor.transform);
                 let pconst_data = model_push_const.as_uniform_buffer_bytes();
                 render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pconst_data);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                render_pass.set_bind_group(0, &self.camera_state.camera_bind_group, &[]);
                 for mesh in actor.meshes.iter() {
                     render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     render_pass
@@ -1065,7 +1118,7 @@ pub fn run(actors: &[(&str, &Actor)]) -> Result<()> {
                 let offset = (key_state == &ElementState::Pressed)
                     .then_some(1.0)
                     .unwrap_or(-1.0);
-                let mut input = state.camera_controller.get_movement_input();
+                let mut input = state.camera_state.camera_controller.get_movement_input();
                 match keycode {
                     VirtualKeyCode::D => input.x = clamp(input.x + offset, -1.0, 1.0),
                     VirtualKeyCode::A => input.x = clamp(input.x - offset, -1.0, 1.0),
@@ -1075,7 +1128,10 @@ pub fn run(actors: &[(&str, &Actor)]) -> Result<()> {
                     VirtualKeyCode::Q => input.z = clamp(input.z - offset, -1.0, 1.0),
                     _ => (),
                 }
-                state.camera_controller.set_movement_input(input);
+                state
+                    .camera_state
+                    .camera_controller
+                    .set_movement_input(input);
             }
             _ => {}
         },

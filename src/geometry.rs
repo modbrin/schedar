@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Result};
-use bytemuck::{Pod, Zeroable};
-use glam::*;
-use itertools::{izip, Itertools};
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
 use std::{mem, path::Path};
+
+use anyhow::Result;
+use bytemuck::{Pod, Zeroable};
+use glam::*;
+use itertools::izip;
 
 /// Bright purple color to visualise missing texture
 pub const DIFFUSE_TEX_FALLBACK_COLOR: Vec3 = Vec3::new(0.99, 0.01, 0.65);

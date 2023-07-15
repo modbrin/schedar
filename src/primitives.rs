@@ -2,7 +2,6 @@ use bytemuck::{Pod, Zeroable};
 use encase::private::WriteInto;
 use encase::{ShaderType, UniformBuffer};
 use glam::*;
-use std::num::NonZeroU64;
 
 pub trait ShaderTypeExt {
     fn as_uniform_buffer_bytes(&self) -> Vec<u8>;
@@ -11,7 +10,7 @@ pub trait ShaderTypeExt {
 impl<T: ShaderType + WriteInto> ShaderTypeExt for T {
     fn as_uniform_buffer_bytes(&self) -> Vec<u8> {
         let mut buf = UniformBuffer::new(Vec::new());
-        buf.write(&self).unwrap();
+        buf.write(self).unwrap();
         buf.into_inner()
     }
 }
@@ -60,6 +59,7 @@ impl Transform {
         self.scale
     }
 
+    /// Set object's world position
     pub fn set_position(mut self, x: f32, y: f32, z: f32) -> Self {
         self.position = Vec3::new(x, y, z);
         self
@@ -71,6 +71,7 @@ impl Transform {
         self
     }
 
+    /// Set scale in all dimensions
     pub fn set_scale(mut self, x: f32, y: f32, z: f32) -> Self {
         self.scale = Vec3::new(x, y, z);
         self

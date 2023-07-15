@@ -15,8 +15,7 @@ v first steps
     v fix shader structs layout mismatch problem
     v move from cgmath to glam
     v make lights array and enable blending render as many lights as possible
-      separate pipeline from mesh (more code restructuring)
-      split state creation into smaller functions
+    v split state creation into smaller functions
   shader improvement
       use blinn-phong in shader
       add shadow mapping
@@ -89,3 +88,4 @@ v first steps
       research voxel cone tracing
       ssgi + sdfgi + vxgi ?
   iridescent shader
+  study bent normals
