@@ -40,10 +40,11 @@ layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
 {
     vec3 lightDir = normalize(-light.direction);
+    vec3 halfDir = normalize(lightDir + viewDir);
     float diff = max(dot(normal, lightDir), 0.0);
-    vec3 reflectDir = reflect(-lightDir, normal);
+//    vec3 reflectDir = reflect(-lightDir, normal);
 
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), materialParams.shininess);
+    float spec = pow(max(dot(normal, halfDir), 0.0), materialParams.shininess);
     vec3 diffuseTex = vec3(texture(sampler2D(texture_diffuse1, sampler_diffuse1), ourTexCoord));
     vec3 ambient  = light.ambient * diffuseTex;
     vec3 diffuse  = light.diffuse * diff * diffuseTex;

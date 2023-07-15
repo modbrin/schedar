@@ -64,9 +64,10 @@ layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
 {
     vec3 lightDir = normalize(light.position - fragPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
     float diff = max(dot(normal, lightDir), 0.0);
-    vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), materialParams.shininess);
+//    vec3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(normal, halfDir), 0.0), materialParams.shininess);
 
     float distance = length(light.position - fragPos);
     float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));
