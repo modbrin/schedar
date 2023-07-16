@@ -9,7 +9,7 @@ use encase::ShaderType;
 use glam::*;
 use num::clamp;
 use wgpu::util::DeviceExt;
-use wgpu::{BlendFactor, BlendOperation};
+use wgpu::{BlendFactor, BlendOperation, CommandEncoder};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -946,60 +946,106 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
-        {
-            let background_color = BACKGROUND_CLR_COLOR;
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Base Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &(*smaa_frame),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background_color.x as f64,
-                            g: background_color.y as f64,
-                            b: background_color.z as f64,
-                            a: background_color.w as f64,
-                        }),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: true,
+        Self::render_base_lights_pass(
+            &self.ctx,
+            &self.render_state.pipeline_base,
+            &self.scene_state,
+            &self.camera_state,
+            &self.lights_state,
+            &mut encoder,
+            &(*smaa_frame),
+            &depth_view,
+        );
+        Self::render_additive_lights_pass(
+            &self.ctx,
+            &self.render_state.pipeline_additive,
+            &self.scene_state,
+            &self.camera_state,
+            &self.lights_state,
+            &mut encoder,
+            &(*smaa_frame),
+            &depth_view,
+        );
+        self.ctx.queue.submit(iter::once(encoder.finish()));
+        smaa_frame.resolve();
+        output.present();
+        Ok(())
+    }
+
+    pub fn render_base_lights_pass(
+        _ctx: &WgpuContext,
+        draw_pipeline: &DrawPipeline,
+        scene_state: &SceneState,
+        camera_state: &CameraState,
+        lights_state: &LightsState,
+        encoder: &mut CommandEncoder,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+    ) {
+        let background_color = BACKGROUND_CLR_COLOR;
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Base Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: background_color.x as f64,
+                        g: background_color.y as f64,
+                        b: background_color.z as f64,
+                        a: background_color.w as f64,
                     }),
-                    stencil_ops: None,
+                    store: true,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
                 }),
-            });
+                stencil_ops: None,
+            }),
+        });
 
-            render_pass.set_pipeline(&self.render_state.pipeline_base.pipeline);
+        render_pass.set_pipeline(&draw_pipeline.pipeline);
 
-            for (_, actor) in self.scene_state.drawable_actors.iter() {
-                let model_push_const = ModelPushConst::from_transform(&actor.transform);
-                let pconst_data = model_push_const.as_uniform_buffer_bytes();
-                render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pconst_data);
-                render_pass.set_bind_group(0, &self.camera_state.camera_bind_group, &[]);
-                render_pass.set_bind_group(1, &self.lights_state.lights_base_bind_group, &[]);
-                for mesh in actor.meshes.iter() {
-                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.set_bind_group(
-                        2,
-                        &actor.textures[mesh.material_id].texture_bind_group,
-                        &[],
-                    );
-                    render_pass.draw_indexed(0..mesh.indices_num, 0, 0..1);
-                }
+        for (_, actor) in scene_state.drawable_actors.iter() {
+            let model_push_const = ModelPushConst::from_transform(&actor.transform);
+            let pconst_data = model_push_const.as_uniform_buffer_bytes();
+            render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pconst_data);
+            render_pass.set_bind_group(0, &camera_state.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &lights_state.lights_base_bind_group, &[]);
+            for mesh in actor.meshes.iter() {
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.set_bind_group(
+                    2,
+                    &actor.textures[mesh.material_id].texture_bind_group,
+                    &[],
+                );
+                render_pass.draw_indexed(0..mesh.indices_num, 0, 0..1);
             }
         }
+    }
+
+    pub fn render_additive_lights_pass(
+        ctx: &WgpuContext,
+        draw_pipeline: &DrawPipeline,
+        scene_state: &SceneState,
+        camera_state: &CameraState,
+        lights_state: &LightsState,
+        encoder: &mut CommandEncoder,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+    ) {
         let mut lights_buf_idx = 0u64;
-        for lights_chunk in self.lights_state.point_lights.chunks(POINT_LIGHTS_PER_PASS) {
+        for lights_chunk in lights_state.point_lights.chunks(POINT_LIGHTS_PER_PASS) {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Additive Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &(*smaa_frame),
+                    view: color_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1007,7 +1053,7 @@ impl State {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
+                    view: depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: true,
@@ -1015,26 +1061,26 @@ impl State {
                     stencil_ops: None,
                 }),
             });
-            render_pass.set_pipeline(&self.render_state.pipeline_additive.pipeline);
+            render_pass.set_pipeline(&draw_pipeline.pipeline);
 
             let light_add_data = SplitLightsAddUniform::from_slice(lights_chunk);
-            self.ctx.queue.write_buffer(
-                &self.lights_state.lights_update_buffer,
+            ctx.queue.write_buffer(
+                &lights_state.lights_update_buffer,
                 lights_buf_idx,
                 &light_add_data.as_uniform_buffer_bytes(),
             );
             render_pass.set_bind_group(
                 1,
-                &self.lights_state.lights_update_buffer_bind_group,
+                &lights_state.lights_update_buffer_bind_group,
                 &[lights_buf_idx as u32],
             );
-            lights_buf_idx += self.lights_state.lights_update_buffer_elem_size;
+            lights_buf_idx += lights_state.lights_update_buffer_elem_size;
 
-            for (_, actor) in self.scene_state.drawable_actors.iter() {
+            for (_, actor) in scene_state.drawable_actors.iter() {
                 let model_push_const = ModelPushConst::from_transform(&actor.transform);
                 let pconst_data = model_push_const.as_uniform_buffer_bytes();
                 render_pass.set_push_constants(wgpu::ShaderStages::VERTEX, 0, &pconst_data);
-                render_pass.set_bind_group(0, &self.camera_state.camera_bind_group, &[]);
+                render_pass.set_bind_group(0, &camera_state.camera_bind_group, &[]);
                 for mesh in actor.meshes.iter() {
                     render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     render_pass
@@ -1048,12 +1094,6 @@ impl State {
                 }
             }
         }
-        self.ctx.queue.submit(iter::once(encoder.finish()));
-
-        smaa_frame.resolve();
-        output.present();
-
-        Ok(())
     }
 }
 
