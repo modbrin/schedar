@@ -1,10 +1,16 @@
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 
 fn main() {
-    compile_to_spirv("light", "vert");
-    compile_to_spirv("light", "frag");
-    compile_to_spirv("light_split_base", "frag");
-    compile_to_spirv("light_split_add", "frag");
+    for (name, ty) in [
+        ("light", "vert"),
+        ("light", "frag"),
+        ("light_split_base", "frag"),
+        ("light_split_base", "frag"),
+        ("post_process", "vert"),
+        ("post_process", "frag"),
+    ] {
+        compile_to_spirv(name, ty);
+    }
 }
 
 fn compile_to_spirv(name: &str, ext: &str) {

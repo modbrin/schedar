@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::{cmp, iter};
 
 use anyhow::{anyhow, Result};
@@ -9,18 +8,18 @@ use encase::ShaderType;
 use glam::*;
 use num::clamp;
 use wgpu::util::DeviceExt;
-use wgpu::{BlendFactor, BlendOperation, CommandEncoder};
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
 
+use crate::prelude::*;
 use crate::primitives::{ShaderTypeDefaultExt, ShaderTypeExt, Transform};
 use crate::utils::*;
 use crate::{
     camera,
-    geometry::{self, CompositeMesh, MaterialParam, StaticMesh, Vertex},
+    mesh::{self, CompositeMesh, MaterialParam, StaticMesh, Vertex},
     texture, transforms, utils,
 };
 
@@ -88,7 +87,7 @@ impl WgpuContext {
             .next()
             .unwrap_or(&surface_caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: *surface_format,
             width: size.width,
             height: size.height,
@@ -263,7 +262,7 @@ impl DrawPipeline {
         is_additive: bool,
     ) -> Self {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
+            label: Some("schedar.pipeline_layout.primary"),
             bind_group_layouts: &[
                 &camera_bind_group_layout,
                 &lights_bind_group_layout,
@@ -279,9 +278,9 @@ impl DrawPipeline {
                 format: config.format,
                 blend: Some(wgpu::BlendState {
                     color: wgpu::BlendComponent {
-                        src_factor: BlendFactor::One, // Raw addition for lights layers onto base
-                        dst_factor: BlendFactor::One,
-                        operation: BlendOperation::Add,
+                        src_factor: wgpu::BlendFactor::One, // raw addition for lights layers onto base
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
                     },
                     alpha: wgpu::BlendComponent::OVER, // TODO: is this correct?
                 }),
@@ -297,8 +296,12 @@ impl DrawPipeline {
                 write_mask: wgpu::ColorWrites::ALL,
             }
         };
+        let label = format!(
+            "schedar.render_pipeline.primary.{}",
+            if is_additive { "additive" } else { "base" }
+        );
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
+            label: Some(&label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_vert,
@@ -347,12 +350,12 @@ impl DrawableMesh {
         material_id: usize,
     ) -> DrawableMesh {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
+            label: Some("schedar.vertex_buffer.drawable_mesh"),
             contents: cast_slice(&static_mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
+            label: Some("schedar.index_buffer.drawable_mesh"),
             contents: cast_slice(&static_mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
@@ -363,37 +366,10 @@ impl DrawableMesh {
             indices_num: static_mesh.indices.len() as u32,
         }
     }
-
-    // TODO: how to use this?
-    // pub fn render<'a, 'b: 'a>(
-    //     pipeline: &'b wgpu::RenderPipeline,
-    //     vertex_buffer: &'b wgpu::Buffer,
-    //     index_buffer: &'b wgpu::Buffer,
-    //     indices_num: u32,
-    //     render_pass: &'a mut wgpu::RenderPass<'a>,
-    //     camera_bind_group: &'a wgpu::BindGroup,
-    //     texture_bind_group: &'a wgpu::BindGroup,
-    // ) {
-    //     render_pass.set_pipeline(&pipeline);
-    //     render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-    //     render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-    //     render_pass.set_bind_group(0, camera_bind_group, &[]);
-    //     render_pass.set_bind_group(1, texture_bind_group, &[]);
-    //     render_pass.draw_indexed(0..indices_num, 0, 0..1);
-    // }
-}
-
-#[derive(Default)]
-struct DrawableImageTextures {
-    albedo: Option<texture::Texture>,
-    normal: Option<texture::Texture>,
-    specular: Option<texture::Texture>,
-    emission: Option<texture::Texture>,
 }
 
 struct DrawableTexture {
     params_buffer: wgpu::Buffer,
-    // image_texture: texture::Texture,
     texture_bind_group: wgpu::BindGroup,
 }
 
@@ -402,15 +378,15 @@ impl DrawableTexture {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
-        material: &geometry::Material,
+        material: &mesh::Material,
     ) -> Result<DrawableTexture> {
         let mut bind_entries = Vec::new();
         let mut material_params = MaterialParams { shininess: 76.8 };
         if let Some(MaterialParam::Scalar(s)) = material.shininess {
-            material_params.shininess = s; // TODO: use texture
+            material_params.shininess = s; // TODO: ability to use texture
         }
         let material_params_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Material Params Uniform Buffer"),
+            label: Some("schedar.uniform_buffer.material_params"),
             size: material_params.size().get(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -420,43 +396,23 @@ impl DrawableTexture {
             binding: 0,
             resource: material_params_uniform_buffer.as_entire_binding(),
         });
-        let mut image_textures = DrawableImageTextures::default();
-        Self::prepare_bind_entries(
-            device,
-            queue,
-            &mut bind_entries,
-            &mut image_textures.albedo,
-            material.albedo.as_ref(),
-            1,
-            geometry::DIFFUSE_TEX_FALLBACK_COLOR,
-        )?;
-        Self::prepare_bind_entries(
-            device,
-            queue,
-            &mut bind_entries,
-            &mut image_textures.specular,
-            material.specular.as_ref(),
-            5,
-            geometry::SPECULAR_TEX_FALLBACK_COLOR,
-        )?;
-        Self::prepare_bind_entries(
-            device,
-            queue,
-            &mut bind_entries,
-            &mut image_textures.normal,
-            material.normal.as_ref(),
-            9,
-            geometry::NORMAL_TEX_FALLBACK_COLOR,
-        )?;
-        Self::prepare_bind_entries(
-            device,
-            queue,
-            &mut bind_entries,
-            &mut image_textures.emission,
-            material.emission.as_ref(),
-            13,
-            geometry::EMISSION_TEX_FALLBACK_COLOR,
-        )?;
+
+        macro_rules! extend_bind_entries {
+            ($mat_param:ident, $geom_fallback:ident, $bind_num:literal) => {
+                let tex = Self::prepare_image_texture(
+                    device,
+                    queue,
+                    material.$mat_param.as_ref(),
+                    mesh::$geom_fallback,
+                )?;
+                Self::add_image_texture_as_bind_entries(&tex, &mut bind_entries, $bind_num);
+            };
+        }
+        extend_bind_entries!(albedo, DIFFUSE_TEX_FALLBACK_COLOR, 1);
+        extend_bind_entries!(specular, SPECULAR_TEX_FALLBACK_COLOR, 5);
+        extend_bind_entries!(normal, NORMAL_TEX_FALLBACK_COLOR, 9);
+        extend_bind_entries!(emission, EMISSION_TEX_FALLBACK_COLOR, 13);
+
         queue.write_buffer(
             &material_params_uniform_buffer,
             0,
@@ -469,7 +425,7 @@ impl DrawableTexture {
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &bind_entries,
-            label: Some("Texture Bind Group"),
+            label: Some("schedar.bind_group.model_textures"),
         });
         let result = DrawableTexture {
             params_buffer: material_params_uniform_buffer,
@@ -478,46 +434,47 @@ impl DrawableTexture {
         Ok(result)
     }
 
-    fn prepare_bind_entries<'a, 'b: 'a>(
+    fn prepare_image_texture(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        bind_entries: &'a mut Vec<wgpu::BindGroupEntry<'b>>,
-        image_texture_tmp: &'b mut Option<texture::Texture>,
         mat_param: Option<&MaterialParam>,
-        bind_num: u32,
         fallback_color: Vec3,
-    ) -> Result<()> {
+    ) -> Result<texture::Texture> {
         if let Some(mparam) = mat_param {
-            let image_texture = match mparam {
+            match mparam {
                 MaterialParam::Texture(path) => texture::Texture::create_texture_data(
                     device,
                     queue,
                     path,
                     wgpu::AddressMode::Repeat,
                     wgpu::AddressMode::Repeat,
-                )?,
+                ),
                 MaterialParam::Color(col) => {
-                    texture::Texture::create_from_color(device, queue, *col)?
+                    texture::Texture::create_from_color(device, queue, *col)
                 }
                 MaterialParam::Scalar(s) => {
                     let col = Vec3::new(*s, *s, *s);
-                    texture::Texture::create_from_color(device, queue, col)?
+                    texture::Texture::create_from_color(device, queue, col)
                 }
-            };
-            *image_texture_tmp = Some(image_texture);
+            }
         } else {
-            let image_texture = texture::Texture::create_from_color(device, queue, fallback_color)?;
-            *image_texture_tmp = Some(image_texture);
+            texture::Texture::create_from_color(device, queue, fallback_color)
         }
+    }
+
+    fn add_image_texture_as_bind_entries<'a>(
+        image_texture: &'a texture::Texture,
+        bind_entries: &mut Vec<wgpu::BindGroupEntry<'a>>,
+        bind_num: u32,
+    ) {
         bind_entries.push(wgpu::BindGroupEntry {
             binding: bind_num,
-            resource: wgpu::BindingResource::TextureView(&image_texture_tmp.as_ref().unwrap().view),
+            resource: wgpu::BindingResource::TextureView(&image_texture.view),
         });
         bind_entries.push(wgpu::BindGroupEntry {
             binding: bind_num + 1,
-            resource: wgpu::BindingResource::Sampler(&image_texture_tmp.as_ref().unwrap().sampler),
+            resource: wgpu::BindingResource::Sampler(&image_texture.sampler),
         });
-        Ok(())
     }
 }
 
@@ -538,6 +495,7 @@ struct RenderState {
     pipeline_additive: DrawPipeline,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     smaa_target: smaa::SmaaTarget,
+    post_process_target: PostProcessTarget,
 }
 
 struct CameraState {
@@ -557,8 +515,6 @@ struct LightsState {
     lights_base_uniform_buffer: wgpu::Buffer,
     lights_base_bind_group_layout: wgpu::BindGroupLayout,
     lights_base_bind_group: wgpu::BindGroup,
-    // lights_add_uniform_buffer: wgpu::Buffer,
-    // lights_add_bind_group: wgpu::BindGroup,
     lights_update_buffer: wgpu::Buffer,
     lights_update_buffer_bind_group_layout: wgpu::BindGroupLayout,
     lights_update_buffer_bind_group: wgpu::BindGroup,
@@ -583,7 +539,7 @@ impl State {
         Ok(state)
     }
 
-    pub fn spawn_actor(&mut self, name: &str, actor: &Actor, shader_name: Arc<str>) -> Result<()> {
+    pub fn spawn_actor(&mut self, name: &str, actor: &Actor) -> Result<()> {
         if self.scene_state.drawable_actors.contains_key(name) {
             return Err(anyhow!("asset with given name already spawned"));
         }
@@ -594,7 +550,7 @@ impl State {
                 let mesh = DrawableMesh::new(&self.ctx.device, static_mesh, mat_id);
                 meshes.push(mesh);
             } else {
-                println!("encountered mesh without referenced texture");
+                error!("encountered mesh without referenced texture");
             }
         }
         for mat in actor.static_mesh.materials.iter() {
@@ -662,7 +618,7 @@ impl State {
                         // emissive1 sampler
                         make_common_bgl_entry_sampler(14),
                     ],
-                    label: Some("Texture Bind Group Layout"),
+                    label: Some("schedar.bind_group_layout.model_textures"),
                 });
         let shader_vert = utils::load_spirv_shader_module(
             &ctx.device,
@@ -700,11 +656,13 @@ impl State {
             true,
         );
         let smaa_target = Self::init_smma_target(&ctx, window);
+        let post_process_target = Self::init_post_process_target(&ctx, window)?;
         let state = RenderState {
             pipeline_base,
             pipeline_additive,
             texture_bind_group_layout,
             smaa_target,
+            post_process_target,
         };
         Ok(state)
     }
@@ -720,6 +678,18 @@ impl State {
         )
     }
 
+    pub fn init_post_process_target(
+        ctx: &WgpuContext,
+        window: &Window,
+    ) -> Result<PostProcessTarget> {
+        PostProcessTarget::new(
+            &ctx.device,
+            window.inner_size().width,
+            window.inner_size().height,
+            ctx.config.format,
+        )
+    }
+
     pub fn init_camera_state(ctx: &WgpuContext) -> CameraState {
         let camera =
             camera::Camera::new((0.0, 10.0, 0.0), -20.0f32.to_radians(), 0.0f32.to_radians());
@@ -729,7 +699,7 @@ impl State {
 
         // stores model and mvp matrix
         let camera_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Camera Uniform Buffer"),
+            label: Some("schedar.uniform_buffer.camera"),
             size: CameraUniform::default_size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -747,7 +717,7 @@ impl State {
                         },
                         count: None,
                     }],
-                    label: Some("Camera Bind Group Layout"),
+                    label: Some("schedar.bind_group_layout.camera"),
                 });
         let camera_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
@@ -755,7 +725,7 @@ impl State {
                 binding: 0,
                 resource: camera_uniform_buffer.as_entire_binding(),
             }],
-            label: Some("Camera Bind Group"),
+            label: Some("schedar.bind_group.camera"),
         });
         CameraState {
             camera,
@@ -770,7 +740,7 @@ impl State {
 
     pub fn init_lights_state(ctx: &WgpuContext) -> LightsState {
         let lights_base_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Lights Uniform Buffer"),
+            label: Some("schedar.uniform_buffer.base_lights"),
             size: SplitLightsBaseUniform::default_size(),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -788,7 +758,7 @@ impl State {
                         },
                         count: None,
                     }],
-                    label: Some("Lights Bind Group Layout"),
+                    label: Some("schedar.bind_group_layout.base_lights"),
                 });
         let lights_base_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &lights_base_bind_group_layout,
@@ -796,14 +766,14 @@ impl State {
                 binding: 0,
                 resource: lights_base_uniform_buffer.as_entire_binding(),
             }],
-            label: Some("Lights Base Bind Group"),
+            label: Some("schedar.bind_group.base_lights"),
         });
         let lights_update_buffer_elem_size = round_to_next_multiple(
             SplitLightsAddUniform::default_size(),
             ctx.device.limits().min_uniform_buffer_offset_alignment as u64,
         );
         let lights_update_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Lights Update Buffer"),
+            label: Some("schedar.uniform_buffer.lights_update"),
             size: lights_update_buffer_elem_size * POINT_LIGHT_UNIFORMS_PER_SCENE as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -820,7 +790,7 @@ impl State {
                     },
                     count: None,
                 }],
-                label: Some("Lights Update Buffer Bind Group Layout"),
+                label: Some("schedar.bind_group_layout.lights_update_buffer"),
             },
         );
         let lights_update_buffer_bind_group =
@@ -834,7 +804,7 @@ impl State {
                         size: NonZeroU64::new(SplitLightsAddUniform::default_size()),
                     }),
                 }],
-                label: Some("Lights Ring Buffer Bind Group"),
+                label: Some("schedar.bind_group.lights_update_buffer"),
             });
         LightsState {
             directional_light: DirectionalLight::default(),
@@ -854,7 +824,6 @@ impl State {
         if new_size.width > 0 && new_size.height > 0 {
             let aspect = new_size.width as f32 / new_size.height as f32;
             self.camera_state.projection = transforms::create_projection(aspect, IS_PERSPECTIVE);
-
             self.ctx.size = new_size;
             self.ctx.config.width = new_size.width;
             self.ctx.config.height = new_size.height;
@@ -864,6 +833,11 @@ impl State {
             self.render_state
                 .smaa_target
                 .resize(&self.ctx.device, new_size.width, new_size.height);
+            self.render_state.post_process_target.resize(
+                &self.ctx.device,
+                new_size.width,
+                new_size.height,
+            );
         }
     }
 
@@ -944,7 +918,7 @@ impl State {
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
+                label: Some("schedar.command_encoder.primary"),
             });
         Self::render_base_lights_pass(
             &self.ctx,
@@ -967,7 +941,19 @@ impl State {
             &depth_view,
         );
         self.ctx.queue.submit(iter::once(encoder.finish()));
+
         smaa_frame.resolve();
+
+        let mut encoder_post =
+            self.ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("schedar.command_encoder.post_process"),
+                });
+        self.render_state
+            .post_process_target
+            .render(&mut encoder_post, &output.texture);
+        self.ctx.queue.submit(iter::once(encoder_post.finish()));
         output.present();
         Ok(())
     }
@@ -978,13 +964,13 @@ impl State {
         scene_state: &SceneState,
         camera_state: &CameraState,
         lights_state: &LightsState,
-        encoder: &mut CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
     ) {
         let background_color = BACKGROUND_CLR_COLOR;
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Base Render Pass"),
+            label: Some("schedar.render_pass.base"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 resolve_target: None,
@@ -1036,14 +1022,14 @@ impl State {
         scene_state: &SceneState,
         camera_state: &CameraState,
         lights_state: &LightsState,
-        encoder: &mut CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
     ) {
         let mut lights_buf_idx = 0u64;
         for lights_chunk in lights_state.point_lights.chunks(POINT_LIGHTS_PER_PASS) {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Additive Render Pass"),
+                label: Some("schedar.render_pass.additive"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: color_view,
                     resolve_target: None,
@@ -1097,27 +1083,378 @@ impl State {
     }
 }
 
+struct PostProcessTarget {
+    render_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    color_texture: wgpu::Texture,
+    color_texture_view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    texture_format: wgpu::TextureFormat,
+    shader_vert: wgpu::ShaderModule,
+    shader_frag: wgpu::ShaderModule,
+    width: u32,
+    height: u32,
+}
+
+impl PostProcessTarget {
+    pub fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        texture_format: wgpu::TextureFormat,
+    ) -> Result<Self> {
+        let shader_vert = utils::load_spirv_shader_module(
+            &device,
+            "base_vert",
+            "./shaders/out/post_process_vert.spv",
+        )?;
+        let shader_frag = utils::load_spirv_shader_module(
+            &device,
+            "base_frag",
+            "./shaders/out/post_process_frag.spv",
+        )?;
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("schedar.sampler.post_process"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let (texture, color_target) =
+            Self::init_color_target(device, width, height, texture_format);
+        let bind_group_layout = Self::init_bind_group_layout(device);
+        let bind_group = Self::init_bind_group(device, &bind_group_layout, &color_target, &sampler);
+        let render_pipeline = Self::init_render_pipeline(
+            device,
+            &bind_group_layout,
+            &shader_vert,
+            &shader_frag,
+            texture_format,
+        );
+        let out = Self {
+            render_pipeline,
+            bind_group_layout,
+            bind_group,
+            color_texture: texture,
+            color_texture_view: color_target,
+            sampler,
+            texture_format,
+            shader_vert,
+            shader_frag,
+            width,
+            height,
+        };
+        Ok(out)
+    }
+
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        let (texture, texture_view) =
+            Self::init_color_target(device, width, height, self.texture_format);
+        self.color_texture = texture;
+        self.color_texture_view = texture_view;
+        self.bind_group = Self::init_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.color_texture_view,
+            &self.sampler,
+        );
+    }
+
+    pub fn init_color_target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture_desc = wgpu::TextureDescriptor {
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            label: None,
+            view_formats: &[],
+        };
+        let texture = device.create_texture(&texture_desc);
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("schedar.color_target.view"),
+            ..Default::default()
+        });
+        (texture, texture_view)
+    }
+    pub fn init_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                // make_common_bgl_entry_uniform(0),
+                make_common_bgl_entry_texture(0),
+                make_common_bgl_entry_sampler(1),
+            ],
+            label: Some("schedar.bind_group_layout.post_process"),
+        })
+    }
+    pub fn init_bind_group(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        color_target: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        let bind_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&color_target),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ];
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &bind_entries,
+            label: Some("schedar.bind_group.post_process"),
+        });
+        texture_bind_group
+    }
+
+    pub fn init_render_pipeline(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        shader_vert: &wgpu::ShaderModule,
+        shader_frag: &wgpu::ShaderModule,
+        texture_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("schedar.render_pipeline_layout.post_process"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let color_target_state = wgpu::ColorTargetState {
+            format: texture_format,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent::REPLACE,
+                alpha: wgpu::BlendComponent::REPLACE,
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("schedar.render_pipeline.post_process"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_vert,
+                entry_point: "main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_frag,
+                entry_point: "main",
+                targets: &[Some(color_target_state)],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        pipeline
+    }
+
+    fn render(&self, encoder: &mut wgpu::CommandEncoder, out_tex: &wgpu::Texture) {
+        {
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &out_tex,
+                    mip_level: 0,
+                    aspect: wgpu::TextureAspect::All,
+                    origin: wgpu::Origin3d::ZERO,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.color_texture,
+                    mip_level: 0,
+                    aspect: wgpu::TextureAspect::All,
+                    origin: wgpu::Origin3d::ZERO,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        {
+            let out_tex_view = out_tex.create_view(&wgpu::TextureViewDescriptor::default()); //&self.color_target,
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("schedar.render_pass.post_process"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out_tex_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+pub struct ShaderPushConsts {
+    light_space_matrix: Mat4,
+    model: Mat4,
+}
+
+pub struct ShadowTarget {
+    render_pipeline: wgpu::RenderPipeline,
+    depth_texture: wgpu::Texture,
+    depth_texture_view: wgpu::TextureView,
+    shader_vert: wgpu::ShaderModule,
+    shader_frag: wgpu::ShaderModule,
+    width: u32,
+    height: u32,
+}
+
+impl ShadowTarget {
+    pub fn new(device: &wgpu::Device) -> Result<Self> {
+        let shader_vert = utils::load_spirv_shader_module(
+            &device,
+            "base_vert",
+            "./shaders/out/shadow_depth_vert.spv",
+        )?;
+        let shader_frag = utils::load_spirv_shader_module(
+            &device,
+            "base_frag",
+            "./shaders/out/shadow_depth_frag.spv",
+        )?;
+        let (width, height) = (1024, 1024);
+        let (depth_texture, depth_texture_view) = Self::init_texture(device, width, height);
+        let render_pipeline = Self::init_render_pipeline(device, &shader_vert, &shader_frag);
+        let result = Self {
+            render_pipeline,
+            depth_texture,
+            depth_texture_view,
+            shader_vert,
+            shader_frag,
+            width,
+            height,
+        };
+        Ok(result)
+    }
+
+    pub fn init_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            label: Some("schedar.texture.shadow.depth"),
+            view_formats: &[],
+        });
+        let texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("schedar.texture_view.shadow.depth"),
+            ..Default::default()
+        });
+        (depth_texture, texture_view)
+    }
+
+    pub fn init_render_pipeline(
+        device: &wgpu::Device,
+        shader_vert: &wgpu::ShaderModule,
+        shader_frag: &wgpu::ShaderModule,
+    ) -> wgpu::RenderPipeline {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("schedar.render_pipeline_layout.shadow"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[wgpu::PushConstantRange {
+                stages: wgpu::ShaderStages::VERTEX,
+                range: 0..ShaderPushConsts::default_size() as u32,
+            }],
+        });
+        // let color_target_state = wgpu::ColorTargetState {
+        //     format: texture_format,
+        //     blend: Some(wgpu::BlendState {
+        //         color: wgpu::BlendComponent::REPLACE,
+        //         alpha: wgpu::BlendComponent::REPLACE,
+        //     }),
+        //     write_mask: wgpu::ColorWrites::ALL,
+        // };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("schedar.render_pipeline.shadow"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_vert,
+                entry_point: "main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_frag,
+                entry_point: "main",
+                targets: &[], //&[Some(color_target_state)],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        pipeline
+    }
+}
+
 pub fn run(actors: &[(&str, &Actor)]) -> Result<()> {
-    env_logger::init();
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop)?;
     window.set_title(WINDOW_TITLE);
     let mut state = pollster::block_on(State::new(&window))?;
 
     for (name, actor) in actors.into_iter() {
-        state.spawn_actor(name, actor, "todo".into())?;
+        state.spawn_actor(name, actor)?;
     }
 
-    state.add_point_light(Vec3::new(-100.0, 10.0, 10.0), random_color());
-    state.add_point_light(Vec3::new(-75.0, 10.0, 0.0), random_color());
-    state.add_point_light(Vec3::new(-50.0, 10.0, 10.0), random_color());
-    state.add_point_light(Vec3::new(-25.0, 10.0, 0.0), random_color());
-    state.add_point_light(Vec3::new(0.0, 10.0, 10.0), random_color());
-    state.add_point_light(Vec3::new(25.0, 10.0, 0.0), random_color());
-    state.add_point_light(Vec3::new(50.0, 10.0, 10.0), random_color());
-    state.add_point_light(Vec3::new(75.0, 10.0, 0.0), random_color());
-    state.add_point_light(Vec3::new(100.0, 10.0, 10.0), random_color());
-    state.add_point_light(Vec3::new(125.0, 10.0, 0.0), random_color());
+    state.add_point_light(Vec3::new(10.0, 10.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+    // state.add_point_light(Vec3::new(-75.0, 10.0, 0.0), random_color());
+    // state.add_point_light(Vec3::new(-50.0, 10.0, 10.0), random_color());
+    // state.add_point_light(Vec3::new(-25.0, 10.0, 0.0), random_color());
+    // state.add_point_light(Vec3::new(0.0, 10.0, 10.0), random_color());
+    // state.add_point_light(Vec3::new(25.0, 10.0, 0.0), random_color());
+    // state.add_point_light(Vec3::new(50.0, 10.0, 10.0), random_color());
+    // state.add_point_light(Vec3::new(75.0, 10.0, 0.0), random_color());
+    // state.add_point_light(Vec3::new(100.0, 10.0, 10.0), random_color());
+    // state.add_point_light(Vec3::new(125.0, 10.0, 0.0), random_color());
 
     let mut render_start_time = std::time::Instant::now();
 
@@ -1185,7 +1522,7 @@ pub fn run(actors: &[(&str, &Actor)]) -> Result<()> {
                 Ok(_) => {}
                 Err(wgpu::SurfaceError::Lost) => state.resize(state.ctx.size),
                 Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
-                Err(e) => eprintln!("{:?}", e),
+                Err(e) => error!("{:?}", e),
             }
         }
         Event::MainEventsCleared => {

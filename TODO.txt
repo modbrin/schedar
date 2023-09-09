@@ -4,7 +4,7 @@ v first steps
     v fps flying movement
     v multiple cubes and moving light
     v restructure code
-  loading objects and textures from files
+v loading objects and textures from files
     v asset struct
     v use obj crate
     v loading textures
@@ -17,31 +17,40 @@ v first steps
     v make lights array and enable blending render as many lights as possible
     v split state creation into smaller functions
   shader improvement
-      use blinn-phong in shader
-      add shadow mapping
+    v use blinn-phong in shader
+      add primitive shadow mapping
       add normal mapping
       add cubemaps support
       sprite rendering (debug scene icons)
-  add normal mapping
-  add fps counter
+  drawable entity manager
+      make entity id generation
+      texture and mesh manager
+  add debug text rendering
+      add fps counter
+  shadows improvement
+      implement cascaded shadow maps
+      implement soft shadows
   change api facing coordinates to use Z as up
-  try to replace all samplers with only one
   enable antialiasing and filtering
     v add smaa
       add taa
       add amd fsr
+      change setting in runtime
   implement pbr shader
       find articles to study how to implement it
       add reflection hdr maps support
   add transparent objects
       add render ordering
       temporal dithering?
-  basic shadows
-  move rendering logic to separate module
+  code refactoring
+      move rendering logic to separate module
+      separate rendering primitives, render passes, post processing
+  add debug ui for real-time scene controls
+      maybe imgui?
   project logo
   asset manager
-      use ddx or similar format for textures
-      import assets => convert objects and images into internal format (gltf?)
+      use ddx or gltf for textures
+      import assets => convert objects and images into internal format, own vs gltf?
   editor features
       line tracing in scene, collision detection maybe needed?
       mouse cursor tracing
@@ -56,14 +65,11 @@ v first steps
       regional scene loading
       level streaming
   basic collision and physics
-  scene manager
+  scene graph
   actors, components and ecs module
   async asset loading
-  tetris demo
-  add decals
-  add post-processing step
-  debug gui
-      use imgui
+  extra features
+      add decals
   animation
       loading fbx format?
       basic animation playback
@@ -76,16 +82,14 @@ v first steps
   particle system
   reflections
   lod
-  ssao
+  ambient occlusion
+      implement ssao
   engine architecture planning
-  add engine utilities
-      collision detection
-      speed utils
-      detection if actor is grounded
-  threading
-  level streaming
-  better lighting
+      threading
+      assets and levels loading management
+  advanced lighting
       research voxel cone tracing
       ssgi + sdfgi + vxgi ?
-  iridescent shader
-  study bent normals
+  experiments
+      iridescent shader
+      study bent normals

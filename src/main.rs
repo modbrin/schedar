@@ -1,17 +1,36 @@
+use tracing::metadata::LevelFilter;
+use tracing_subscriber::prelude::*;
+
+use crate::mesh::CompositeMesh;
 use crate::primitives::Transform;
 use crate::render::Actor;
-use geometry::CompositeMesh;
 
 mod camera;
 mod error;
-mod geometry;
+mod mesh;
 mod primitives;
 mod render;
 mod texture;
 mod transforms;
 mod utils;
 
+pub mod prelude {
+    pub use tracing::{debug, error, info};
+}
+
+fn setup_logger(level: LevelFilter) {
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_filter(level);
+    tracing_subscriber::registry().with(fmt_layer).init();
+}
+
 fn main() {
+    setup_logger(LevelFilter::WARN);
+
     // "../pons-starter/assets/crytek_sponza/sponza.obj"
     // "../Sponza/sponza.obj"
     // "../pons-starter/assets/backpack/backpack.obj"
