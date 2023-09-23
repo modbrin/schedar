@@ -2,6 +2,9 @@ use bytemuck::Zeroable;
 use glam::*;
 use num::clamp;
 
+
+pub const UP_DIRECTION: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
 pub struct Camera {
     pub position: Vec3,
     yaw: f32,
@@ -27,7 +30,7 @@ impl Camera {
         Mat4::look_to_rh(
             self.position,
             Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize(),
-            Vec3::new(0.0, 1.0, 0.0),
+            UP_DIRECTION,
         )
     }
 }

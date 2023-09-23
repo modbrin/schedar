@@ -3,11 +3,15 @@ use std::process::Command;
 fn main() {
     for (name, ty) in [
         ("light", "vert"),
-        ("light", "frag"),
+        // ("light", "frag"),
         ("light_split_base", "frag"),
-        ("light_split_base", "frag"),
+        ("light_split_add", "frag"),
         ("post_process", "vert"),
         ("post_process", "frag"),
+        ("shadow_depth", "vert"),
+        ("shadow_depth", "frag"),
+        ("debug_texture", "vert"),
+        ("debug_texture", "frag"),
     ] {
         compile_to_spirv(name, ty);
     }

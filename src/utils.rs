@@ -77,6 +77,19 @@ pub fn make_common_bgl_entry_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry
     }
 }
 
+pub fn make_depth_bgl_entry_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            multisampled: false,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            sample_type: wgpu::TextureSampleType::Depth,
+        },
+        count: None,
+    }
+}
+
 pub fn random_color() -> Vec3 {
     let mut rng = rand::thread_rng();
     let mut gen = || rng.gen_range(0.0f32..1.0);

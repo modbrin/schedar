@@ -5,6 +5,7 @@ layout (location = 0) in vec3 ourViewPos;
 layout (location = 1) in vec3 ourFragPos;
 layout (location = 2) in vec3 ourNormal;
 layout (location = 3) in vec2 ourTexCoord;
+layout (location = 4) in vec4 ourFragPosLightSpace;
 
 struct DirectionalLight {
     vec3 direction;
@@ -36,6 +37,18 @@ layout(set = 2, binding = 10) uniform sampler sampler_normal1;
 layout(set = 2, binding = 13) uniform texture2D texture_emissive1;
 layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 
+layout(set = 3, binding = 0) uniform texture2D texture_shadowmap1;
+layout(set = 3, binding = 1) uniform sampler sampler_shadowmap1;
+
+float CalcShadow(vec4 fragPosLightSpace)
+{
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+    float closestDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), projCoords.xy).r;
+    float currentDepth = projCoords.z;
+    float shadow = currentDepth > closestDepth ? 1.0 : 0.0;
+    return shadow;
+}
 
 vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
 {
@@ -49,7 +62,12 @@ vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
     vec3 ambient  = light.ambient * diffuseTex;
     vec3 diffuse  = light.diffuse * diff * diffuseTex;
     vec3 specular = light.specular * spec * vec3(texture(sampler2D(texture_specular1, sampler_specular1), ourTexCoord));
-    return ambient + diffuse + specular;
+    float shadow = CalcShadow(ourFragPosLightSpace);
+    if (shadow > 0.0) {
+        return vec3(1.0, 0.0, 0.0);
+    } else {
+        return ambient + (diffuse + specular);
+    }
 }
 
 //vec3 debugBinaryVec(vec3 v) {
@@ -93,7 +111,8 @@ void main()
     vec3 result = vec3(0);
 
     if (lights.directionalEnabled != 0) {
-        result += 0.01 * CalcDirLight(lights.directionalLight, norm, viewDir);
+//        result += 0.01 * CalcDirLight(lights.directionalLight, norm, viewDir);
+        result += 1.0 * CalcDirLight(lights.directionalLight, norm, viewDir);
     }
 
     float diffuseAlpha = texture(sampler2D(texture_diffuse1, sampler_diffuse1), ourTexCoord).a;

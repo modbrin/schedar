@@ -5,6 +5,7 @@ layout (location = 0) in vec3 ourViewPos;
 layout (location = 1) in vec3 ourFragPos;
 layout (location = 2) in vec3 ourNormal;
 layout (location = 3) in vec2 ourTexCoord;
+layout (location = 4) in vec4 ourFragPosLightSpace;
 
 #define NR_POINT_LIGHTS 4
 #define NR_SPOT_LIGHTS 4
