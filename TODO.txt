@@ -18,7 +18,9 @@ v loading objects and textures from files
     v split state creation into smaller functions
   shader improvement
     v use blinn-phong in shader
-      add primitive shadow mapping
+    v add primitive shadow mapping for directional light
+      derive shadow map size from camera frustum
+      add shadow mapping for point lights
       add normal mapping
       add cubemaps support
       sprite rendering (debug scene icons)
@@ -30,7 +32,7 @@ v loading objects and textures from files
   shadows improvement
       implement cascaded shadow maps
       implement soft shadows
-  change api facing coordinates to use Z as up
+  change api facing coordinates to use Z as up?
   enable antialiasing and filtering
     v add smaa
       add taa

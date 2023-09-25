@@ -2,7 +2,6 @@ use bytemuck::Zeroable;
 use glam::*;
 use num::clamp;
 
-
 pub const UP_DIRECTION: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 
 pub struct Camera {
@@ -25,13 +24,13 @@ impl Camera {
     }
 
     pub fn view_mat(&self) -> Mat4 {
+        Mat4::look_to_rh(self.position, self.direction(), UP_DIRECTION)
+    }
+
+    pub fn direction(&self) -> Vec3 {
         let (pitch_sin, pitch_cos) = self.pitch.sin_cos();
         let (yaw_sin, yaw_cos) = self.yaw.sin_cos();
-        Mat4::look_to_rh(
-            self.position,
-            Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize(),
-            UP_DIRECTION,
-        )
+        Vec3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize()
     }
 }
 

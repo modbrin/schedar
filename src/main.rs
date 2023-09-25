@@ -14,6 +14,10 @@ mod texture;
 mod transforms;
 mod utils;
 
+mod debug_texture_target;
+mod post_process_target;
+mod shadow_target;
+
 pub mod prelude {
     pub use tracing::{debug, error, info};
 }

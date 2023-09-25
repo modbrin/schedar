@@ -1,4 +1,4 @@
-#version 450
+#version 450 core
 layout (location = 0) out vec4 FragColor;
 
 layout (location = 0) in vec3 ourViewPos;
@@ -20,10 +20,10 @@ layout(set = 1, binding = 0) uniform Lights {
 } lights;
 
 
+// material parameters
 layout(set = 2, binding = 0) uniform MaterialParams {
     float shininess;
 } materialParams;
-
 // diffuse
 layout(set = 2, binding = 1) uniform texture2D texture_diffuse1;
 layout(set = 2, binding = 2) uniform sampler sampler_diffuse1;
@@ -33,20 +33,21 @@ layout(set = 2, binding = 6) uniform sampler sampler_specular1;
 // normal
 layout(set = 2, binding = 9) uniform texture2D texture_normal1;
 layout(set = 2, binding = 10) uniform sampler sampler_normal1;
-//emissive
+// emissive
 layout(set = 2, binding = 13) uniform texture2D texture_emissive1;
 layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 
+// shadow map
 layout(set = 3, binding = 0) uniform texture2D texture_shadowmap1;
 layout(set = 3, binding = 1) uniform sampler sampler_shadowmap1;
 
 float CalcShadow(vec4 fragPosLightSpace)
 {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    projCoords = projCoords * 0.5 + 0.5;
-    float closestDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), projCoords.xy).r;
+    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    float closestDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), vec2(projCoords.x, 1.0 - projCoords.y)).r;
     float currentDepth = projCoords.z;
-    float shadow = currentDepth > closestDepth ? 1.0 : 0.0;
+    float shadow = (currentDepth - closestDepth > 0.0001) ? 1.0 : 0.0;
     return shadow;
 }
 
@@ -63,11 +64,7 @@ vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
     vec3 diffuse  = light.diffuse * diff * diffuseTex;
     vec3 specular = light.specular * spec * vec3(texture(sampler2D(texture_specular1, sampler_specular1), ourTexCoord));
     float shadow = CalcShadow(ourFragPosLightSpace);
-    if (shadow > 0.0) {
-        return vec3(1.0, 0.0, 0.0);
-    } else {
-        return ambient + (diffuse + specular);
-    }
+    return ambient + (diffuse + specular) * (1.0 - shadow);
 }
 
 //vec3 debugBinaryVec(vec3 v) {
