@@ -41,14 +41,24 @@ layout(set = 2, binding = 14) uniform sampler sampler_emissive1;
 layout(set = 3, binding = 0) uniform texture2D texture_shadowmap1;
 layout(set = 3, binding = 1) uniform sampler sampler_shadowmap1;
 
-float CalcShadow(vec4 fragPosLightSpace)
+float CalcShadow(vec4 fragPosLightSpace, vec3 lightDir, vec3 surfaceNormal)
 {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
-    float closestDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), vec2(projCoords.x, 1.0 - projCoords.y)).r;
+    float closestDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), vec2(projCoords.x, projCoords.y)).r;
     float currentDepth = projCoords.z;
-    float shadow = (currentDepth - closestDepth > 0.0001) ? 1.0 : 0.0;
-    return shadow;
+    float bias = max(0.005 * (1.0 - dot(surfaceNormal, lightDir)), 0.0005);
+//    float shadow = (currentDepth - closestDepth > bias) ? 1.0 : 0.0;
+
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / textureSize(sampler2D(texture_shadowmap1, sampler_shadowmap1), 0);
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float pcfDepth = texture(sampler2D(texture_shadowmap1, sampler_shadowmap1), vec2(projCoords.x, 1.0 - projCoords.y) + vec2(x, y) * texelSize).r;
+            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+        }
+    }
+    return shadow / 9.0;
 }
 
 vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
@@ -63,8 +73,8 @@ vec3 CalcDirLight(DirectionalLight light, vec3 normal, vec3 viewDir)
     vec3 ambient  = light.ambient * diffuseTex;
     vec3 diffuse  = light.diffuse * diff * diffuseTex;
     vec3 specular = light.specular * spec * vec3(texture(sampler2D(texture_specular1, sampler_specular1), ourTexCoord));
-    float shadow = CalcShadow(ourFragPosLightSpace);
-    return ambient + (diffuse + specular) * (1.0 - shadow);
+    float shadow = CalcShadow(ourFragPosLightSpace, lightDir, normal);
+    return ambient * 0.3 + (diffuse + specular) * (1.0 - shadow);
 }
 
 //vec3 debugBinaryVec(vec3 v) {
